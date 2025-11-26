@@ -38,4 +38,3 @@ export class BlockchainError extends Error {
     Error.captureStackTrace(this, this.constructor);
   }
 }
-

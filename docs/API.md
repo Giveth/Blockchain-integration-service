@@ -2,11 +2,192 @@
 
 ## Table of Contents
 
+- [REST API Endpoints](#rest-api-endpoints)
 - [Transaction Verification Service](#transaction-verification-service)
 - [Chain-Specific Services](#chain-specific-services)
 - [Safe Transaction Service](#safe-transaction-service)
 - [Types](#types)
 - [Utilities](#utilities)
+
+## REST API Endpoints
+
+### Health Check
+
+**GET** `/api/health`
+
+Check the health status of the service.
+
+**Response:**
+```json
+{
+  "success": true,
+  "status": "healthy",
+  "timestamp": "2024-01-01T00:00:00.000Z",
+  "environment": "production",
+  "version": "1.0.0"
+}
+```
+
+---
+
+### Verify Transaction
+
+**POST** `/api/transactions/verify`
+
+Verify a single transaction against expected parameters.
+
+**Request Body:**
+```json
+{
+  "txHash": "0xabc123...",
+  "networkId": 1,
+  "symbol": "ETH",
+  "fromAddress": "0x1234...",
+  "toAddress": "0x5678...",
+  "amount": 1.5,
+  "timestamp": 1234567890,
+  "isSwap": false,
+  "safeTxHash": "",
+  "nonce": 0,
+  "chainType": "EVM",
+  "importedFromDraftOrBackupService": false
+}
+```
+
+**Response (Success):**
+```json
+{
+  "success": true,
+  "data": {
+    "isValid": true,
+    "transaction": {
+      "hash": "0xabc123...",
+      "amount": 1.5,
+      "from": "0x1234...",
+      "to": "0x5678...",
+      "currency": "ETH",
+      "timestamp": 1234567890,
+      "status": "SUCCESS",
+      "blockNumber": 12345678,
+      "gasUsed": "21000",
+      "gasPrice": "50000000000"
+    }
+  }
+}
+```
+
+**Response (Validation Failed):**
+```json
+{
+  "success": true,
+  "data": {
+    "isValid": false,
+    "error": "Transaction amount does not match expected amount",
+    "errorCode": "AMOUNT_MISMATCH"
+  }
+}
+```
+
+**Response (Error):**
+```json
+{
+  "success": false,
+  "error": "Validation failed",
+  "details": [
+    {
+      "field": "txHash",
+      "message": "txHash is required"
+    }
+  ]
+}
+```
+
+---
+
+### Batch Verify Transactions
+
+**POST** `/api/transactions/verify-batch`
+
+Verify multiple transactions in parallel (maximum 100 transactions).
+
+**Request Body:**
+```json
+{
+  "transactions": [
+    {
+      "txHash": "0xabc123...",
+      "networkId": 1,
+      "symbol": "ETH",
+      "fromAddress": "0x1234...",
+      "toAddress": "0x5678...",
+      "amount": 1.5,
+      "timestamp": 1234567890
+    },
+    {
+      "txHash": "0xdef456...",
+      "networkId": 137,
+      "symbol": "MATIC",
+      "fromAddress": "0x9abc...",
+      "toAddress": "0xdef0...",
+      "amount": 10.0,
+      "timestamp": 1234567890
+    }
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "total": 2,
+    "successful": 2,
+    "failed": 0,
+    "results": [
+      {
+        "isValid": true,
+        "transaction": { ... }
+      },
+      {
+        "isValid": true,
+        "transaction": { ... }
+      }
+    ]
+  }
+}
+```
+
+---
+
+### Get Transaction Timestamp
+
+**POST** `/api/transactions/timestamp`
+
+Get the timestamp of a transaction from the blockchain.
+
+**Request Body:**
+```json
+{
+  "txHash": "0xabc123...",
+  "networkId": 1
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "txHash": "0xabc123...",
+    "networkId": 1,
+    "timestamp": 1234567890,
+    "date": "2009-02-13T23:31:30.000Z"
+  }
+}
+```
+
+---
 
 ## Transaction Verification Service
 
@@ -162,60 +343,6 @@ const txInfo = await solanaTransactionService.getTransactionInfo({
 
 ---
 
-### Stellar Transaction Service
-
-Handles Stellar blockchain transactions.
-
-#### Methods
-
-##### `getTransactionInfo(input: TransactionDetailInput): Promise<NetworkTransactionInfo>`
-
-Fetches transaction details from Stellar.
-
-**Example:**
-```typescript
-import { stellarTransactionService } from '@giveth/blockchain-integration-service';
-
-const txInfo = await stellarTransactionService.getTransactionInfo({
-  txHash: 'abc123...',
-  networkId: 200,
-  symbol: 'XLM',
-  fromAddress: 'GABC...',
-  toAddress: 'GDEF...',
-  amount: 100,
-  timestamp: Date.now() / 1000,
-});
-```
-
----
-
-### Cardano Transaction Service
-
-Handles Cardano blockchain transactions.
-
-#### Methods
-
-##### `getTransactionInfo(input: TransactionDetailInput): Promise<NetworkTransactionInfo>`
-
-Fetches transaction details from Cardano using Blockfrost API.
-
-**Example:**
-```typescript
-import { cardanoTransactionService } from '@giveth/blockchain-integration-service';
-
-const txInfo = await cardanoTransactionService.getTransactionInfo({
-  txHash: 'abc123...',
-  networkId: 300,
-  symbol: 'ADA',
-  fromAddress: 'addr1...',
-  toAddress: 'addr1...',
-  amount: 50,
-  timestamp: Date.now() / 1000,
-});
-```
-
----
-
 ## Safe Transaction Service
 
 Handles Gnosis Safe multisig transactions.
@@ -272,8 +399,6 @@ const isExecuted = await safeTransactionService.isSafeTransactionExecuted(
 enum ChainType {
   EVM = 'EVM',
   SOLANA = 'SOLANA',
-  STELLAR = 'STELLAR',
-  CARDANO = 'CARDANO',
 }
 ```
 
@@ -365,18 +490,6 @@ Validates Solana address format.
 #### `isValidSolanaSignature(signature: string): boolean`
 
 Validates Solana transaction signature.
-
----
-
-#### `isValidStellarAddress(address: string): boolean`
-
-Validates Stellar address format.
-
----
-
-#### `isValidCardanoAddress(address: string): boolean`
-
-Validates Cardano address format.
 
 ---
 

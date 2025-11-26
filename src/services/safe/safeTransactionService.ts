@@ -152,4 +152,3 @@ export class SafeTransactionService {
 
 // Export singleton instance
 export const safeTransactionService = new SafeTransactionService();
-

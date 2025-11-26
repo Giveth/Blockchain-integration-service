@@ -6,19 +6,23 @@ import {
   NetworkTransactionInfo,
   TransactionDetailInput,
   TransactionStatus,
+  ChainType,
 } from '../../../types';
-import { getNetworkConfig } from '../../../config';
+import { getNetworkConfig, getChainType } from '../../../config';
 import { isValidEvmTransactionHash } from '../../../utils/validation';
+import { IChainHandler } from '../IChainHandler';
 
-/**
- * Service for handling EVM (Ethereum Virtual Machine) blockchain transactions
- */
-export class EvmTransactionService {
+export class EvmTransactionService implements IChainHandler {
   private providers: Map<number, ethers.providers.JsonRpcProvider> = new Map();
 
-  /**
-   * Get or create provider for a network
-   */
+  isSupported(networkId: number): boolean {
+    try {
+      return getChainType(networkId) === ChainType.EVM;
+    } catch {
+      return false;
+    }
+  }
+
   private getProvider(networkId: number): ethers.providers.JsonRpcProvider {
     if (!this.providers.has(networkId)) {
       const networkConfig = getNetworkConfig(networkId);
@@ -37,9 +41,6 @@ export class EvmTransactionService {
     return this.providers.get(networkId)!;
   }
 
-  /**
-   * Get transaction timestamp from block
-   */
   async getTransactionTimestamp(
     txHash: string,
     networkId: number,
@@ -79,9 +80,6 @@ export class EvmTransactionService {
     }
   }
 
-  /**
-   * Check if a transaction is a swap that transfers to the target address
-   */
   async isSwapTransactionToAddress(
     networkId: number,
     txHash: string,
@@ -92,14 +90,16 @@ export class EvmTransactionService {
       const receipt = await provider.getTransactionReceipt(txHash);
 
       if (!receipt || !receipt.logs) {
-        logger.debug('No transaction receipt or logs found for swap validation', {
-          txHash,
-          networkId,
-        });
+        logger.debug(
+          'No transaction receipt or logs found for swap validation',
+          {
+            txHash,
+            networkId,
+          },
+        );
         return false;
       }
 
-      // Transfer event signature: Transfer(address,address,uint256)
       const transferEventSignature =
         '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
@@ -109,7 +109,6 @@ export class EvmTransactionService {
             log.topics[0] === transferEventSignature &&
             log.topics.length >= 3
           ) {
-            // Extract the 'to' address from the Transfer event
             const transferToAddress = '0x' + log.topics[2].substring(26);
 
             if (transferToAddress.toLowerCase() === toAddress.toLowerCase()) {
@@ -149,9 +148,6 @@ export class EvmTransactionService {
     }
   }
 
-  /**
-   * Get transaction information from EVM network
-   */
   async getTransactionInfo(
     input: TransactionDetailInput,
   ): Promise<NetworkTransactionInfo> {
@@ -163,7 +159,6 @@ export class EvmTransactionService {
       symbol,
     });
 
-    // Validate transaction hash format
     if (!isValidEvmTransactionHash(txHash)) {
       throw new BlockchainError(
         BlockchainErrorCode.INVALID_TRANSACTION_HASH,
@@ -187,7 +182,6 @@ export class EvmTransactionService {
         );
       }
 
-      // Check if transaction failed
       if (receipt && receipt.status === 0) {
         throw new BlockchainError(
           BlockchainErrorCode.TRANSACTION_FAILED,
@@ -201,15 +195,11 @@ export class EvmTransactionService {
         : null;
       const timestamp = block?.timestamp || Math.floor(Date.now() / 1000);
 
-      // Parse amount from transaction value
       let txAmount: number;
       if (symbol.toUpperCase() === 'ETH' || symbol.toUpperCase() === 'MATIC') {
-        // Native currency transaction
         txAmount = parseFloat(ethers.utils.formatEther(tx.value));
       } else {
-        // ERC20 token transaction - parse from logs
-        txAmount = amount; // For now, use provided amount
-        // TODO: Parse actual amount from Transfer event logs
+        txAmount = amount;
       }
 
       const transactionInfo: NetworkTransactionInfo = {
@@ -259,6 +249,4 @@ export class EvmTransactionService {
   }
 }
 
-// Export singleton instance
 export const evmTransactionService = new EvmTransactionService();
-

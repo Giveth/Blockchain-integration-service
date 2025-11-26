@@ -6,19 +6,23 @@ import {
   NetworkTransactionInfo,
   TransactionDetailInput,
   TransactionStatus,
+  ChainType,
 } from '../../../types';
-import { getNetworkConfig } from '../../../config';
+import { getNetworkConfig, getChainType } from '../../../config';
 import { isValidSolanaSignature } from '../../../utils/validation';
+import { IChainHandler } from '../IChainHandler';
 
-/**
- * Service for handling Solana blockchain transactions
- */
-export class SolanaTransactionService {
+export class SolanaTransactionService implements IChainHandler {
   private connections: Map<number, Connection> = new Map();
 
-  /**
-   * Get or create connection for a network
-   */
+  isSupported(networkId: number): boolean {
+    try {
+      return getChainType(networkId) === ChainType.SOLANA;
+    } catch {
+      return false;
+    }
+  }
+
   private getConnection(networkId: number): Connection {
     if (!this.connections.has(networkId)) {
       const networkConfig = getNetworkConfig(networkId);
@@ -35,9 +39,6 @@ export class SolanaTransactionService {
     return this.connections.get(networkId)!;
   }
 
-  /**
-   * Get transaction information from Solana network
-   */
   async getTransactionInfo(
     input: TransactionDetailInput,
   ): Promise<NetworkTransactionInfo> {
@@ -49,7 +50,6 @@ export class SolanaTransactionService {
       symbol,
     });
 
-    // Validate signature format
     if (!isValidSolanaSignature(txHash)) {
       throw new BlockchainError(
         BlockchainErrorCode.INVALID_TRANSACTION_HASH,
@@ -61,7 +61,6 @@ export class SolanaTransactionService {
     try {
       const connection = this.getConnection(networkId);
 
-      // Fetch transaction
       const transaction = await connection.getParsedTransaction(txHash, {
         maxSupportedTransactionVersion: 0,
       });
@@ -74,7 +73,6 @@ export class SolanaTransactionService {
         );
       }
 
-      // Check transaction status
       if (transaction.meta?.err) {
         throw new BlockchainError(
           BlockchainErrorCode.TRANSACTION_FAILED,
@@ -83,13 +81,10 @@ export class SolanaTransactionService {
         );
       }
 
-      // Get timestamp from block
       const timestamp = transaction.blockTime || Math.floor(Date.now() / 1000);
 
-      // Parse amount from transaction
       let amount = 0;
       if (symbol.toUpperCase() === 'SOL') {
-        // Native SOL transfer
         const preBalances = transaction.meta?.preBalances || [];
         const postBalances = transaction.meta?.postBalances || [];
 
@@ -97,10 +92,9 @@ export class SolanaTransactionService {
         const fromPubkey = new PublicKey(fromAddress);
         const toPubkey = new PublicKey(toAddress);
 
-        const accountKeys =
-          transaction.transaction.message.accountKeys.map((key) =>
-            typeof key === 'string' ? key : key.pubkey.toString(),
-          );
+        const accountKeys = transaction.transaction.message.accountKeys.map(
+          (key) => (typeof key === 'string' ? key : key.pubkey.toString()),
+        );
 
         const fromIndex = accountKeys.findIndex(
           (key) => key === fromPubkey.toString(),
@@ -115,8 +109,6 @@ export class SolanaTransactionService {
           amount = (postBalance - preBalance) / LAMPORTS_PER_SOL;
         }
       } else {
-        // SPL token transfer
-        // Parse from token balances
         const preTokenBalances = transaction.meta?.preTokenBalances || [];
         const postTokenBalances = transaction.meta?.postTokenBalances || [];
 
@@ -125,10 +117,7 @@ export class SolanaTransactionService {
             (pre) => pre.accountIndex === postBalance.accountIndex,
           );
 
-          if (
-            postBalance.owner === toAddress &&
-            postBalance.mint // This would be the token mint address
-          ) {
+          if (postBalance.owner === toAddress && postBalance.mint) {
             const preAmount = parseFloat(
               preBalance?.uiTokenAmount?.uiAmount?.toString() || '0',
             );
@@ -183,6 +172,4 @@ export class SolanaTransactionService {
   }
 }
 
-// Export singleton instance
 export const solanaTransactionService = new SolanaTransactionService();
-

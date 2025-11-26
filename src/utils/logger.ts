@@ -36,7 +36,7 @@ class Logger {
       timestamp,
       level,
       message,
-      ...(meta && { meta }),
+      ...(meta && typeof meta === 'object' ? { meta } : {}),
     };
 
     const output = JSON.stringify(logEntry);
@@ -76,4 +76,3 @@ class Logger {
 }
 
 export const logger = new Logger();
-

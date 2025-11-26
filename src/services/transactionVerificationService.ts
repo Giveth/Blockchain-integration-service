@@ -8,17 +8,15 @@ import {
 import { getTransactionInfoFromNetwork } from './chains';
 import { safeTransactionService } from './safe';
 import { logger } from '../utils/logger';
-import { closeTo, isTimestampValid, normalizeAddress } from '../utils/validation';
+import {
+  closeTo,
+  isTimestampValid,
+  normalizeAddress,
+} from '../utils/validation';
 import { config } from '../config';
 import { evmTransactionService } from './chains/evm/evmTransactionService';
 
-/**
- * Core service for blockchain transaction verification
- */
 export class TransactionVerificationService {
-  /**
-   * Validate transaction details against expected values
-   */
   private async validateTransaction(
     transaction: NetworkTransactionInfo,
     input: TransactionDetailInput,
@@ -32,11 +30,12 @@ export class TransactionVerificationService {
 
     // For swap transactions, use special validation
     if (input.isSwap) {
-      const isValidSwap = await evmTransactionService.isSwapTransactionToAddress(
-        input.networkId,
-        input.txHash,
-        input.toAddress,
-      );
+      const isValidSwap =
+        await evmTransactionService.isSwapTransactionToAddress(
+          input.networkId,
+          input.txHash,
+          input.toAddress,
+        );
 
       if (!isValidSwap) {
         throw new BlockchainError(
@@ -53,7 +52,6 @@ export class TransactionVerificationService {
       return;
     }
 
-    // Validate 'to' address
     if (
       normalizeAddress(transaction.to) !== normalizeAddress(input.toAddress)
     ) {
@@ -68,7 +66,6 @@ export class TransactionVerificationService {
       );
     }
 
-    // Validate 'from' address
     if (
       normalizeAddress(transaction.from) !== normalizeAddress(input.fromAddress)
     ) {
@@ -83,8 +80,9 @@ export class TransactionVerificationService {
       );
     }
 
-    // Validate amount (with delta tolerance)
-    if (!closeTo(transaction.amount, input.amount, config.transactionAmountDelta)) {
+    if (
+      !closeTo(transaction.amount, input.amount, config.transactionAmountDelta)
+    ) {
       throw new BlockchainError(
         BlockchainErrorCode.AMOUNT_MISMATCH,
         'Transaction amount does not match expected amount',
@@ -97,7 +95,6 @@ export class TransactionVerificationService {
       );
     }
 
-    // Validate timestamp (unless imported from draft/backup service)
     if (!input.importedFromDraftOrBackupService) {
       if (
         !isTimestampValid(
@@ -124,9 +121,6 @@ export class TransactionVerificationService {
     });
   }
 
-  /**
-   * Verify a transaction and validate it against expected parameters
-   */
   async verifyTransaction(
     input: TransactionDetailInput,
   ): Promise<TransactionValidationResult> {
@@ -137,8 +131,6 @@ export class TransactionVerificationService {
     });
 
     try {
-      // Handle Safe transactions - fetch actual tx hash first
-      let actualTxHash = input.txHash;
       if (input.safeTxHash && !input.txHash) {
         logger.debug('Fetching Safe transaction hash', {
           safeTxHash: input.safeTxHash,
@@ -160,14 +152,10 @@ export class TransactionVerificationService {
           );
         }
 
-        actualTxHash = safeHash;
         input.txHash = safeHash;
       }
 
-      // Get transaction info from the blockchain
       const transaction = await getTransactionInfoFromNetwork(input);
-
-      // Validate the transaction
       await this.validateTransaction(transaction, input);
 
       logger.info('Transaction verification successful', {
@@ -197,7 +185,6 @@ export class TransactionVerificationService {
         };
       }
 
-      // Unknown error
       logger.error('Unexpected error during transaction verification', {
         error,
         txHash: input.txHash,
@@ -214,9 +201,6 @@ export class TransactionVerificationService {
     }
   }
 
-  /**
-   * Verify multiple transactions in parallel
-   */
   async verifyTransactions(
     inputs: TransactionDetailInput[],
   ): Promise<TransactionValidationResult[]> {
@@ -238,9 +222,6 @@ export class TransactionVerificationService {
     return results;
   }
 
-  /**
-   * Get transaction timestamp
-   */
   async getTransactionTimestamp(
     txHash: string,
     networkId: number,
@@ -270,6 +251,5 @@ export class TransactionVerificationService {
   }
 }
 
-// Export singleton instance
-export const transactionVerificationService = new TransactionVerificationService();
-
+export const transactionVerificationService =
+  new TransactionVerificationService();

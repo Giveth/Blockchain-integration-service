@@ -1,10 +1,6 @@
 import { NetworkConfig, NetworkId, ChainType } from '../types';
 
-/**
- * Network configurations for all supported blockchains
- */
 export const NETWORK_CONFIGS: Record<number, NetworkConfig> = {
-  // Ethereum Mainnet
   [NetworkId.MAINNET]: {
     id: NetworkId.MAINNET,
     name: 'Ethereum Mainnet',
@@ -17,7 +13,6 @@ export const NETWORK_CONFIGS: Record<number, NetworkConfig> = {
       decimals: 18,
     },
   },
-  // Polygon
   [NetworkId.POLYGON]: {
     id: NetworkId.POLYGON,
     name: 'Polygon',
@@ -30,7 +25,6 @@ export const NETWORK_CONFIGS: Record<number, NetworkConfig> = {
       decimals: 18,
     },
   },
-  // Optimism
   [NetworkId.OPTIMISM]: {
     id: NetworkId.OPTIMISM,
     name: 'Optimism',
@@ -43,7 +37,6 @@ export const NETWORK_CONFIGS: Record<number, NetworkConfig> = {
       decimals: 18,
     },
   },
-  // Arbitrum
   [NetworkId.ARBITRUM]: {
     id: NetworkId.ARBITRUM,
     name: 'Arbitrum One',
@@ -56,7 +49,6 @@ export const NETWORK_CONFIGS: Record<number, NetworkConfig> = {
       decimals: 18,
     },
   },
-  // Gnosis Chain
   [NetworkId.GNOSIS]: {
     id: NetworkId.GNOSIS,
     name: 'Gnosis Chain',
@@ -69,7 +61,6 @@ export const NETWORK_CONFIGS: Record<number, NetworkConfig> = {
       decimals: 18,
     },
   },
-  // Celo
   [NetworkId.CELO]: {
     id: NetworkId.CELO,
     name: 'Celo',
@@ -82,7 +73,6 @@ export const NETWORK_CONFIGS: Record<number, NetworkConfig> = {
       decimals: 18,
     },
   },
-  // Base
   [NetworkId.BASE]: {
     id: NetworkId.BASE,
     name: 'Base',
@@ -95,7 +85,30 @@ export const NETWORK_CONFIGS: Record<number, NetworkConfig> = {
       decimals: 18,
     },
   },
-  // Solana
+  [NetworkId.BSC]: {
+    id: NetworkId.BSC,
+    name: 'BNB Smart Chain',
+    chainType: ChainType.EVM,
+    rpcUrl: process.env.BSC_RPC_URL,
+    blockExplorerUrl: 'https://bscscan.com',
+    nativeCurrency: {
+      name: 'BNB',
+      symbol: 'BNB',
+      decimals: 18,
+    },
+  },
+  [NetworkId.AVALANCHE]: {
+    id: NetworkId.AVALANCHE,
+    name: 'Avalanche',
+    chainType: ChainType.EVM,
+    rpcUrl: process.env.AVALANCHE_RPC_URL,
+    blockExplorerUrl: 'https://snowtrace.io',
+    nativeCurrency: {
+      name: 'AVAX',
+      symbol: 'AVAX',
+      decimals: 18,
+    },
+  },
   [NetworkId.SOLANA_MAINNET]: {
     id: NetworkId.SOLANA_MAINNET,
     name: 'Solana Mainnet',
@@ -108,36 +121,8 @@ export const NETWORK_CONFIGS: Record<number, NetworkConfig> = {
       decimals: 9,
     },
   },
-  // Stellar
-  [NetworkId.STELLAR_MAINNET]: {
-    id: NetworkId.STELLAR_MAINNET,
-    name: 'Stellar Mainnet',
-    chainType: ChainType.STELLAR,
-    rpcUrl: process.env.STELLAR_NETWORK_URL,
-    blockExplorerUrl: 'https://stellarchain.io',
-    nativeCurrency: {
-      name: 'Stellar Lumens',
-      symbol: 'XLM',
-      decimals: 7,
-    },
-  },
-  // Cardano
-  [NetworkId.CARDANO_MAINNET]: {
-    id: NetworkId.CARDANO_MAINNET,
-    name: 'Cardano Mainnet',
-    chainType: ChainType.CARDANO,
-    blockExplorerUrl: 'https://cardanoscan.io',
-    nativeCurrency: {
-      name: 'Cardano',
-      symbol: 'ADA',
-      decimals: 6,
-    },
-  },
 };
 
-/**
- * Get network configuration by network ID
- */
 export const getNetworkConfig = (networkId: number): NetworkConfig => {
   const config = NETWORK_CONFIGS[networkId];
   if (!config) {
@@ -146,18 +131,11 @@ export const getNetworkConfig = (networkId: number): NetworkConfig => {
   return config;
 };
 
-/**
- * Get chain type for a network ID
- */
 export const getChainType = (networkId: number): ChainType => {
   const config = getNetworkConfig(networkId);
   return config.chainType;
 };
 
-/**
- * Check if network ID is supported
- */
 export const isNetworkSupported = (networkId: number): boolean => {
   return networkId in NETWORK_CONFIGS;
 };
-

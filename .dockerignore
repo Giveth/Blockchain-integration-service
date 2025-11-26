@@ -1,0 +1,17 @@
+node_modules
+dist
+npm-debug.log
+.git
+.gitignore
+.env
+.env.local
+.DS_Store
+*.md
+docs
+src/tests
+.eslintrc.json
+.prettierrc
+tsconfig.json
+LICENSE
+PROJECT_SUMMARY.md
+

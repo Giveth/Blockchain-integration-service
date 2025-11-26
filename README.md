@@ -1,31 +1,101 @@
 # Blockchain Integration Service
 
-A comprehensive TypeScript service for blockchain transaction verification and multi-chain support. This service provides a unified interface for interacting with multiple blockchain networks including EVM chains, Solana, Stellar, and Cardano.
+A comprehensive REST API service for blockchain transaction verification and multi-chain support. This service provides a unified interface for interacting with multiple blockchain networks including EVM chains and Solana.
 
 ## Features
 
-- 🔗 **Multi-Chain Support**: EVM (Ethereum, Polygon, Optimism, Arbitrum, etc.), Solana, Stellar, and Cardano
+- 🔗 **Multi-Chain Support**: EVM (Ethereum, Polygon, Optimism, Arbitrum, etc.) and Solana
 - ✅ **Transaction Verification**: Comprehensive validation of on-chain transactions
 - 🔒 **Safe/Gnosis Safe Support**: Handle multisig transactions
 - 🔄 **Swap Transaction Support**: Validate DEX swap transactions
+- 🌐 **REST API**: Easy-to-use HTTP endpoints
+- 🐳 **Docker Ready**: Containerized deployment with Docker Compose
 - 📊 **Type-Safe**: Full TypeScript support with detailed type definitions
 - 🚀 **Production Ready**: Error handling, logging, and robust validation
 
-## Installation
+## Quick Start with Docker
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd blockchain-integration-service
+
+# Copy environment file
+cp .env.example .env
+
+# Edit .env with your configuration
+nano .env
+
+# Start with Docker Compose
+docker-compose up -d
+
+# Check health
+curl http://localhost:3000/api/health
+```
+
+## Installation as Library
 
 ```bash
 npm install @giveth/blockchain-integration-service
 ```
 
-## Quick Start
+## REST API Usage
+
+### Verify a Transaction
+
+```bash
+curl -X POST http://localhost:3000/api/transactions/verify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "txHash": "0x...",
+    "networkId": 1,
+    "symbol": "ETH",
+    "fromAddress": "0x...",
+    "toAddress": "0x...",
+    "amount": 1.5,
+    "timestamp": 1234567890
+  }'
+```
+
+### Batch Verification
+
+```bash
+curl -X POST http://localhost:3000/api/transactions/verify-batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "transactions": [
+      {
+        "txHash": "0x...",
+        "networkId": 1,
+        "symbol": "ETH",
+        "fromAddress": "0x...",
+        "toAddress": "0x...",
+        "amount": 1.5,
+        "timestamp": 1234567890
+      }
+    ]
+  }'
+```
+
+### Get Transaction Timestamp
+
+```bash
+curl -X POST http://localhost:3000/api/transactions/timestamp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "txHash": "0x...",
+    "networkId": 1
+  }'
+```
+
+## Library Usage
 
 ```typescript
 import { transactionVerificationService, TransactionDetailInput } from '@giveth/blockchain-integration-service';
 
-// Verify an Ethereum transaction
 const input: TransactionDetailInput = {
   txHash: '0x...',
-  networkId: 1, // Ethereum Mainnet
+  networkId: 1,
   symbol: 'ETH',
   fromAddress: '0x...',
   toAddress: '0x...',
@@ -80,10 +150,8 @@ TRANSACTION_TIME_THRESHOLD=3600
 - BSC (56)
 - Avalanche (43114)
 
-### Non-EVM Networks
+### Non-EVM
 - Solana Mainnet (101)
-- Stellar Mainnet (200)
-- Cardano Mainnet (300)
 
 ## API Reference
 
@@ -161,22 +229,6 @@ const isValid = await evmTransactionService.isSwapTransactionToAddress(networkId
 import { solanaTransactionService } from '@giveth/blockchain-integration-service';
 
 const txInfo = await solanaTransactionService.getTransactionInfo(input);
-```
-
-#### Stellar Transaction Service
-
-```typescript
-import { stellarTransactionService } from '@giveth/blockchain-integration-service';
-
-const txInfo = await stellarTransactionService.getTransactionInfo(input);
-```
-
-#### Cardano Transaction Service
-
-```typescript
-import { cardanoTransactionService } from '@giveth/blockchain-integration-service';
-
-const txInfo = await cardanoTransactionService.getTransactionInfo(input);
 ```
 
 ## Error Handling
@@ -270,13 +322,12 @@ const result = await transactionVerificationService.verifyTransaction({
 ```typescript
 const result = await transactionVerificationService.verifyTransaction({
   txHash: '5J7Qu...',
-  networkId: 101, // Solana Mainnet
+  networkId: 101,
   symbol: 'SOL',
   fromAddress: 'Donor123...',
   toAddress: 'Project456...',
   amount: 5,
   timestamp: Math.floor(Date.now() / 1000),
-  chainType: ChainType.SOLANA,
 });
 ```
 
@@ -300,6 +351,59 @@ results.forEach((result, index) => {
 });
 ```
 
+## REST API Endpoints
+
+### Health Check
+- **GET** `/api/health`
+- Returns service health status
+
+### Transaction Verification
+- **POST** `/api/transactions/verify`
+- Verify a single transaction
+
+### Batch Transaction Verification
+- **POST** `/api/transactions/verify-batch`
+- Verify multiple transactions (max 100)
+
+### Get Transaction Timestamp
+- **POST** `/api/transactions/timestamp`
+- Get timestamp of a transaction
+
+See [API Documentation](docs/API.md) for detailed endpoint specifications.
+
+## Deployment
+
+### Docker
+
+```bash
+# Build image
+docker build -t blockchain-integration-service .
+
+# Run container
+docker run -p 3000:3000 --env-file .env blockchain-integration-service
+```
+
+### Docker Compose
+
+```bash
+# Start services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop services
+docker-compose down
+```
+
+### Production Deployment
+
+1. Set environment variables for production
+2. Use a reverse proxy (nginx) for SSL/TLS
+3. Configure rate limiting and authentication as needed
+4. Monitor logs and health endpoint
+5. Set up auto-scaling based on load
+
 ## Development
 
 ### Setup
@@ -312,6 +416,13 @@ npm install
 cp .env.example .env
 
 # Edit .env with your API keys
+nano .env
+```
+
+### Run Development Server
+
+```bash
+npm run dev
 ```
 
 ### Build
@@ -320,10 +431,10 @@ cp .env.example .env
 npm run build
 ```
 
-### Development Mode
+### Run Production
 
 ```bash
-npm run dev
+npm start
 ```
 
 ### Testing
@@ -343,18 +454,49 @@ npm run lint:fix
 
 ```
 src/
+├── api/              # REST API layer
+│   ├── routes/       # API route handlers
+│   ├── middleware/   # Express middleware
+│   └── app.ts        # Express app setup
 ├── config/           # Configuration and network definitions
 ├── services/         # Core services
 │   ├── chains/       # Chain-specific implementations
 │   │   ├── evm/      # EVM blockchain support
 │   │   ├── solana/   # Solana support
-│   │   ├── stellar/  # Stellar support
-│   │   └── cardano/  # Cardano support
+│   │   ├── IChainHandler.ts  # Chain interface
+│   │   └── ChainRegistry.ts  # Plugin registry
 │   ├── safe/         # Safe/Gnosis Safe integration
 │   └── transactionVerificationService.ts  # Main service
 ├── types/            # TypeScript type definitions
 ├── utils/            # Utility functions
-└── index.ts          # Main entry point
+├── index.ts          # Library entry point
+└── server.ts         # API server entry point
+```
+
+### Plugin Architecture
+
+The service uses a plugin-based architecture for easy chain addition:
+
+1. **IChainHandler Interface**: All chain services implement this interface
+2. **ChainRegistry**: Central registry for chain handlers
+3. **Easy Extension**: Add new chains by implementing IChainHandler and registering
+
+To add a new blockchain:
+
+```typescript
+// 1. Create a new handler implementing IChainHandler
+export class NewChainService implements IChainHandler {
+  isSupported(networkId: number): boolean {
+    // Implementation
+  }
+  
+  async getTransactionInfo(input: TransactionDetailInput): Promise<NetworkTransactionInfo> {
+    // Implementation
+  }
+}
+
+// 2. Register in ChainRegistry
+chainRegistry.registerHandler(ChainType.NEW_CHAIN, newChainService);
 ```
 
 ## Contributing
