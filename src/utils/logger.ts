@@ -3,14 +3,14 @@
  */
 
 export enum LogLevel {
-  DEBUG = 'debug',
-  INFO = 'info',
-  WARN = 'warn',
-  ERROR = 'error',
-  FATAL = 'fatal',
+  DEBUG = 'DEBUG',
+  INFO = 'INFO',
+  WARN = 'WARN',
+  ERROR = 'ERROR',
+  FATAL = 'FATAL',
 }
 
-class Logger {
+export class Logger {
   private logLevel: LogLevel;
 
   constructor() {
