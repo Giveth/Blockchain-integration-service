@@ -5,6 +5,7 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import transactionRoutes from './routes/transaction.routes';
 import healthRoutes from './routes/health.routes';
+import chainsRoutes from './routes/chains.routes';
 import { errorHandler } from './middleware/errorHandler';
 import { requestLogger } from './middleware/requestLogger';
 
@@ -17,8 +18,12 @@ export function createApp(): Application {
   app.use(express.urlencoded({ extended: true }));
   app.use(requestLogger);
 
+  // Health check
   app.use('/api/health', healthRoutes);
-  app.use('/api/transactions', transactionRoutes);
+
+  // API routes: /chains, /verify, /verify-batch, /timestamp, /price
+  app.use('/api/chains', chainsRoutes);
+  app.use('/api', transactionRoutes);
 
   app.use((_req: Request, res: Response) => {
     res.status(404).json({

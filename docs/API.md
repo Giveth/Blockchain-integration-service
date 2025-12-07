@@ -3,6 +3,14 @@
 ## Table of Contents
 
 - [REST API Endpoints](#rest-api-endpoints)
+  - [Health Check](#health-check)
+  - [Get Supported Chains](#get-supported-chains)
+  - [Get Chain by ID](#get-chain-by-id)
+  - [Get Transaction URL](#get-transaction-url)
+  - [Verify Transaction](#verify-transaction)
+  - [Batch Verify Transactions](#batch-verify-transactions)
+  - [Get Transaction Timestamp](#get-transaction-timestamp)
+  - [Get Token Price](#get-token-price)
 - [Transaction Verification Service](#transaction-verification-service)
 - [Chain-Specific Services](#chain-specific-services)
 - [Safe Transaction Service](#safe-transaction-service)
@@ -30,9 +38,112 @@ Check the health status of the service.
 
 ---
 
+### Get Supported Chains
+
+**GET** `/api/chains`
+
+Returns all supported blockchain networks.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "chains": [
+      {
+        "id": 1,
+        "name": "Ethereum Mainnet",
+        "nativeCurrency": {
+          "name": "Ethereum",
+          "symbol": "ETH",
+          "decimals": 18
+        },
+        "blockExplorerUrl": "https://etherscan.io",
+        "isActive": true
+      },
+      {
+        "id": 137,
+        "name": "Polygon",
+        "nativeCurrency": {
+          "name": "MATIC",
+          "symbol": "MATIC",
+          "decimals": 18
+        },
+        "blockExplorerUrl": "https://polygonscan.com",
+        "isActive": true
+      }
+    ]
+  }
+}
+```
+
+---
+
+### Get Chain by ID
+
+**GET** `/api/chains/:networkId`
+
+Returns configuration for a specific chain.
+
+**Parameters:**
+- `networkId` (path): The chain/network ID
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": 1,
+    "name": "Ethereum Mainnet",
+    "nativeCurrency": {
+      "name": "Ethereum",
+      "symbol": "ETH",
+      "decimals": 18
+    },
+    "blockExplorerUrl": "https://etherscan.io",
+    "isActive": true
+  }
+}
+```
+
+**Response (Not Found):**
+```json
+{
+  "success": false,
+  "error": "Chain not found: 999999",
+  "code": "CHAIN_NOT_FOUND"
+}
+```
+
+---
+
+### Get Transaction URL
+
+**GET** `/api/chains/:networkId/transaction-url/:txHash`
+
+Returns the block explorer URL for a transaction.
+
+**Parameters:**
+- `networkId` (path): The chain/network ID
+- `txHash` (path): Transaction hash
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "url": "https://etherscan.io/tx/0xabc123..."
+  }
+}
+```
+
+---
+
 ### Verify Transaction
 
-**POST** `/api/transactions/verify`
+**POST** `/api/verify`
+
+Verify a single transaction against expected parameters.
 
 Verify a single transaction against expected parameters.
 
@@ -59,18 +170,13 @@ Verify a single transaction against expected parameters.
 {
   "success": true,
   "data": {
-    "isValid": true,
+    "status": "SUCCESS",
     "transaction": {
       "hash": "0xabc123...",
-      "amount": 1.5,
       "from": "0x1234...",
       "to": "0x5678...",
-      "currency": "ETH",
-      "timestamp": 1234567890,
-      "status": "SUCCESS",
-      "blockNumber": 12345678,
-      "gasUsed": "21000",
-      "gasPrice": "50000000000"
+      "amount": 1.5,
+      "timestamp": 1234567890
     }
   }
 }
@@ -81,7 +187,7 @@ Verify a single transaction against expected parameters.
 {
   "success": true,
   "data": {
-    "isValid": false,
+    "status": "FAILED",
     "error": "Transaction amount does not match expected amount",
     "errorCode": "AMOUNT_MISMATCH"
   }
@@ -106,7 +212,7 @@ Verify a single transaction against expected parameters.
 
 ### Batch Verify Transactions
 
-**POST** `/api/transactions/verify-batch`
+**POST** `/api/verify-batch`
 
 Verify multiple transactions in parallel (maximum 100 transactions).
 
@@ -146,12 +252,24 @@ Verify multiple transactions in parallel (maximum 100 transactions).
     "failed": 0,
     "results": [
       {
-        "isValid": true,
-        "transaction": { ... }
+        "status": "SUCCESS",
+        "transaction": {
+          "hash": "0xabc123...",
+          "from": "0x1234...",
+          "to": "0x5678...",
+          "amount": 1.5,
+          "timestamp": 1234567890
+        }
       },
       {
-        "isValid": true,
-        "transaction": { ... }
+        "status": "SUCCESS",
+        "transaction": {
+          "hash": "0xdef456...",
+          "from": "0x9abc...",
+          "to": "0xdef0...",
+          "amount": 10.0,
+          "timestamp": 1234567890
+        }
       }
     ]
   }
@@ -162,7 +280,7 @@ Verify multiple transactions in parallel (maximum 100 transactions).
 
 ### Get Transaction Timestamp
 
-**POST** `/api/transactions/timestamp`
+**POST** `/api/timestamp`
 
 Get the timestamp of a transaction from the blockchain.
 
@@ -186,6 +304,47 @@ Get the timestamp of a transaction from the blockchain.
   }
 }
 ```
+
+---
+
+### Get Token Price
+
+**POST** `/api/price`
+
+Get the current USD price of a token.
+
+**Request Body:**
+```json
+{
+  "networkId": 1,
+  "symbol": "ETH",
+  "tokenAddress": null
+}
+```
+
+For ERC-20 tokens, provide the contract address:
+```json
+{
+  "networkId": 1,
+  "symbol": "USDC",
+  "tokenAddress": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "networkId": 1,
+    "symbol": "ETH",
+    "tokenAddress": null,
+    "priceUsd": 2345.67
+  }
+}
+```
+
+**Note:** If the price cannot be fetched, `priceUsd` returns `0` instead of an error.
 
 ---
 
@@ -393,12 +552,49 @@ const isExecuted = await safeTransactionService.isSafeTransactionExecuted(
 
 ## Types
 
+### ChainConfig
+
+Configuration for a supported chain, used in API responses:
+
+```typescript
+interface ChainConfig {
+  id: number;
+  name: string;
+  nativeCurrency: {
+    name: string;
+    symbol: string;
+    decimals: number;
+  };
+  blockExplorerUrl: string;
+  isActive: boolean;
+}
+```
+
 ### ChainType
 
 ```typescript
 enum ChainType {
   EVM = 'EVM',
   SOLANA = 'SOLANA',
+}
+```
+
+### TransactionVerificationResult
+
+Result format for transaction verification API responses:
+
+```typescript
+interface TransactionVerificationResult {
+  status: TransactionStatus;
+  transaction?: {
+    hash: string;
+    from: string;
+    to: string;
+    amount: number;
+    timestamp: number;
+  };
+  error?: string;
+  errorCode?: string;
 }
 ```
 
@@ -522,4 +718,6 @@ import { logger } from '@giveth/blockchain-integration-service';
 logger.info('Transaction verified', { txHash: '0x123...' });
 logger.error('Verification failed', { error: 'Amount mismatch' });
 ```
+
+
 

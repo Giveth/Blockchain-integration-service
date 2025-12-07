@@ -8,7 +8,7 @@ describe('Express App', () => {
   describe('Middleware', () => {
     it('should parse JSON bodies', async () => {
       const response = await request(app)
-        .post('/api/transactions/verify')
+        .post('/api/verify')
         .send({ test: 'data' })
         .set('Content-Type', 'application/json');
 
@@ -17,7 +17,7 @@ describe('Express App', () => {
 
     it('should handle URL encoded bodies', async () => {
       const response = await request(app)
-        .post('/api/transactions/verify')
+        .post('/api/verify')
         .send('key=value')
         .set('Content-Type', 'application/x-www-form-urlencoded');
 
@@ -45,7 +45,7 @@ describe('Express App', () => {
     });
 
     it('should have transaction routes mounted', async () => {
-      const response = await request(app).post('/api/transactions/verify');
+      const response = await request(app).post('/api/verify');
 
       expect(response.status).to.not.equal(404);
     });

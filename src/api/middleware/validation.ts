@@ -1,9 +1,15 @@
 import { Request, Response, NextFunction } from 'express';
 import Joi from 'joi';
 
-export function validateRequest(schema: Joi.ObjectSchema) {
+export type ValidationSource = 'body' | 'params' | 'query';
+
+export function validateRequest(
+  schema: Joi.ObjectSchema,
+  source: ValidationSource = 'body',
+) {
   return (req: Request, res: Response, next: NextFunction): void => {
-    const { error } = schema.validate(req.body, {
+    const dataToValidate = req[source];
+    const { error, value } = schema.validate(dataToValidate, {
       abortEarly: false,
       stripUnknown: true,
     });
@@ -19,6 +25,9 @@ export function validateRequest(schema: Joi.ObjectSchema) {
       });
       return;
     }
+
+    // Assign validated values back to request
+    req[source] = value;
 
     next();
   };

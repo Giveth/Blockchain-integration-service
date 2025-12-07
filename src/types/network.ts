@@ -30,6 +30,23 @@ export interface NetworkConfig {
     symbol: string;
     decimals: number;
   };
+  isActive?: boolean;
+}
+
+/**
+ * Chain configuration for external API responses
+ * This is the format expected by client services
+ */
+export interface ChainConfig {
+  id: number;
+  name: string;
+  nativeCurrency: {
+    name: string;
+    symbol: string;
+    decimals: number;
+  };
+  blockExplorerUrl: string;
+  isActive: boolean;
 }
 
 export enum TransactionStatus {
@@ -73,4 +90,48 @@ export interface TransactionValidationResult {
   transaction?: NetworkTransactionInfo;
   error?: string;
   errorCode?: string;
+}
+
+/**
+ * Transaction verification input from external services
+ */
+export interface TransactionVerificationInput {
+  txHash: string;
+  networkId: number;
+  symbol: string;
+  fromAddress: string;
+  toAddress: string;
+  amount: number;
+  timestamp: number;
+  nonce?: number;
+  chainType?: string;
+  safeTxHash?: string;
+  isSwap?: boolean;
+  importedFromDraftOrBackupService?: boolean;
+}
+
+/**
+ * Transaction verification result for external API responses
+ * This is the format expected by client services
+ */
+export interface TransactionVerificationResult {
+  status: TransactionStatus;
+  transaction?: {
+    hash: string;
+    from: string;
+    to: string;
+    amount: number;
+    timestamp: number;
+  };
+  error?: string;
+  errorCode?: string;
+}
+
+/**
+ * Token price request input
+ */
+export interface TokenPriceInput {
+  networkId: number;
+  symbol: string;
+  tokenAddress?: string | null;
 }
