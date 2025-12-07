@@ -9,8 +9,29 @@ import {
   ChainType,
 } from '../../../types';
 import { getNetworkConfig, getChainType } from '../../../config';
+import { isDonationHandlerAddress } from '../../../config/donationHandlers';
 import { isValidEvmTransactionHash } from '../../../utils/validation';
 import { IChainHandler } from '../IChainHandler';
+
+// ERC-20 Transfer event signature: Transfer(address indexed from, address indexed to, uint256 value)
+const TRANSFER_EVENT_SIGNATURE =
+  '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+
+// DonationMade event signature from DonationHandler contract
+// DonationMade(address indexed recipientAddress, uint256 amount, address indexed tokenAddress, bytes data)
+const DONATION_MADE_EVENT_SIGNATURE =
+  '0x6b1cbfbbaec984cbf08e8eda37ef0ae09c9b6dd3db0b9a048cb8b47e63c0f939';
+
+// Native token address (used in DonationMade events for ETH/MATIC donations)
+const NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+export interface DonationTransferInfo {
+  from: string;
+  to: string;
+  amount: bigint;
+  tokenAddress: string;
+  isNativeToken?: boolean;
+}
 
 export class EvmTransactionService implements IChainHandler {
   private providers: Map<number, ethers.providers.JsonRpcProvider> = new Map();
@@ -80,6 +101,305 @@ export class EvmTransactionService implements IChainHandler {
     }
   }
 
+  /**
+   * Parse Transfer events from transaction logs
+   * Returns all ERC-20 transfers found in the transaction
+   */
+  private parseTransferEvents(
+    logs: ethers.providers.Log[],
+  ): DonationTransferInfo[] {
+    const transfers: DonationTransferInfo[] = [];
+
+    for (const log of logs) {
+      try {
+        if (
+          log.topics[0] === TRANSFER_EVENT_SIGNATURE &&
+          log.topics.length >= 3
+        ) {
+          // Decode Transfer event: Transfer(address indexed from, address indexed to, uint256 value)
+          const from = '0x' + log.topics[1].substring(26);
+          const to = '0x' + log.topics[2].substring(26);
+          const amount = ethers.BigNumber.from(log.data).toBigInt();
+
+          transfers.push({
+            from,
+            to,
+            amount,
+            tokenAddress: log.address,
+            isNativeToken: false,
+          });
+        }
+      } catch (error) {
+        logger.debug('Error parsing transfer event', {
+          error: error instanceof Error ? error.message : 'Unknown error',
+          log,
+        });
+        continue;
+      }
+    }
+
+    return transfers;
+  }
+
+  /**
+   * Parse DonationMade events from transaction logs
+   * Used for both ERC-20 and native token donations through donation handler
+   * Event: DonationMade(address indexed recipientAddress, uint256 amount, address indexed tokenAddress, bytes data)
+   */
+  private parseDonationMadeEvents(
+    logs: ethers.providers.Log[],
+    txFrom: string,
+  ): DonationTransferInfo[] {
+    const donations: DonationTransferInfo[] = [];
+
+    for (const log of logs) {
+      try {
+        if (
+          log.topics[0] === DONATION_MADE_EVENT_SIGNATURE &&
+          log.topics.length >= 3
+        ) {
+          // Decode DonationMade event
+          // topic[1] = recipientAddress (indexed)
+          // topic[2] = tokenAddress (indexed)
+          // data = amount (uint256) + data (bytes)
+          const to = '0x' + log.topics[1].substring(26);
+          const tokenAddress = '0x' + log.topics[2].substring(26);
+
+          // Decode non-indexed parameters from data
+          // First 32 bytes = amount, rest is dynamic bytes data
+          const amount = ethers.BigNumber.from(
+            '0x' + log.data.substring(2, 66),
+          ).toBigInt();
+
+          const isNativeToken =
+            tokenAddress.toLowerCase() === NATIVE_TOKEN_ADDRESS.toLowerCase();
+
+          donations.push({
+            from: txFrom, // The original transaction sender
+            to,
+            amount,
+            tokenAddress: isNativeToken ? NATIVE_TOKEN_ADDRESS : tokenAddress,
+            isNativeToken,
+          });
+        }
+      } catch (error) {
+        logger.debug('Error parsing DonationMade event', {
+          error: error instanceof Error ? error.message : 'Unknown error',
+          log,
+        });
+        continue;
+      }
+    }
+
+    return donations;
+  }
+
+  /**
+   * Find a specific donation transfer to a recipient address
+   * Used when verifying donations through donation handler contracts
+   */
+  findDonationTransfer(
+    transfers: DonationTransferInfo[],
+    toAddress: string,
+    expectedAmount?: number,
+    tokenDecimals: number = 18,
+  ): DonationTransferInfo | null {
+    const normalizedToAddress = toAddress.toLowerCase();
+
+    // Filter transfers to the target recipient
+    const matchingTransfers = transfers.filter(
+      (t) => t.to.toLowerCase() === normalizedToAddress,
+    );
+
+    if (matchingTransfers.length === 0) {
+      return null;
+    }
+
+    // If only one transfer to this recipient, return it
+    if (matchingTransfers.length === 1) {
+      return matchingTransfers[0];
+    }
+
+    // If multiple transfers and we have an expected amount, find the closest match
+    if (expectedAmount !== undefined) {
+      const expectedAmountBigInt = BigInt(
+        Math.floor(expectedAmount * 10 ** tokenDecimals),
+      );
+
+      // Find transfer with closest amount (within 1% tolerance)
+      const tolerance = expectedAmountBigInt / BigInt(100); // 1% tolerance
+
+      for (const transfer of matchingTransfers) {
+        const diff =
+          transfer.amount > expectedAmountBigInt
+            ? transfer.amount - expectedAmountBigInt
+            : expectedAmountBigInt - transfer.amount;
+
+        if (diff <= tolerance) {
+          return transfer;
+        }
+      }
+    }
+
+    // Return the first matching transfer if no exact match found
+    return matchingTransfers[0];
+  }
+
+  /**
+   * Get transaction info for a donation handler transaction
+   * Parses the logs to find the specific transfer to the recipient
+   * Supports both ERC-20 donations (donateManyERC20) and native token donations (donateManyEth)
+   */
+  async getDonationHandlerTransactionInfo(
+    input: TransactionDetailInput,
+  ): Promise<NetworkTransactionInfo> {
+    const { txHash, networkId, toAddress, amount, symbol } = input;
+
+    logger.debug('Getting donation handler transaction info', {
+      txHash,
+      networkId,
+      toAddress,
+      symbol,
+    });
+
+    const provider = this.getProvider(networkId);
+    const [tx, receipt] = await Promise.all([
+      provider.getTransaction(txHash),
+      provider.getTransactionReceipt(txHash),
+    ]);
+
+    if (!tx) {
+      throw new BlockchainError(
+        BlockchainErrorCode.TRANSACTION_NOT_FOUND,
+        `Transaction not found: ${txHash}`,
+        { txHash, networkId },
+      );
+    }
+
+    if (!receipt) {
+      throw new BlockchainError(
+        BlockchainErrorCode.TRANSACTION_NOT_FOUND,
+        `Transaction receipt not found: ${txHash}`,
+        { txHash, networkId },
+      );
+    }
+
+    if (receipt.status === 0) {
+      throw new BlockchainError(
+        BlockchainErrorCode.TRANSACTION_FAILED,
+        `Transaction failed on blockchain: ${txHash}`,
+        { txHash, networkId },
+      );
+    }
+
+    // Check if this is a native token donation (donateManyEth)
+    // Native token donations have tx.value > 0 and we should parse DonationMade events
+    const isNativeTokenDonation = tx.value.gt(0);
+
+    let donationTransfer: DonationTransferInfo | null = null;
+
+    if (isNativeTokenDonation) {
+      // Parse DonationMade events for native token donations
+      const donations = this.parseDonationMadeEvents(receipt.logs, tx.from);
+
+      logger.debug('Parsed DonationMade events from donation handler', {
+        txHash,
+        donationCount: donations.length,
+        toAddress,
+        isNativeTokenDonation: true,
+      });
+
+      // Filter for native token donations only
+      const nativeDonations = donations.filter((d) => d.isNativeToken);
+
+      donationTransfer = this.findDonationTransfer(
+        nativeDonations,
+        toAddress,
+        amount,
+      );
+    }
+
+    // If no native token donation found, try ERC-20 Transfer events
+    if (!donationTransfer) {
+      const transfers = this.parseTransferEvents(receipt.logs);
+
+      logger.debug('Parsed Transfer events from donation handler', {
+        txHash,
+        transferCount: transfers.length,
+        toAddress,
+      });
+
+      donationTransfer = this.findDonationTransfer(
+        transfers,
+        toAddress,
+        amount,
+      );
+    }
+
+    // If still no transfer found, try all DonationMade events (might be ERC-20 via DonationMade)
+    if (!donationTransfer) {
+      const allDonations = this.parseDonationMadeEvents(receipt.logs, tx.from);
+      donationTransfer = this.findDonationTransfer(
+        allDonations,
+        toAddress,
+        amount,
+      );
+    }
+
+    if (!donationTransfer) {
+      throw new BlockchainError(
+        BlockchainErrorCode.TO_ADDRESS_MISMATCH,
+        `No transfer found to recipient ${toAddress} in donation handler transaction`,
+        {
+          txHash,
+          networkId,
+          expectedTo: toAddress,
+        },
+      );
+    }
+
+    const block = await provider.getBlock(receipt.blockNumber);
+    const timestamp = block?.timestamp || Math.floor(Date.now() / 1000);
+
+    // Convert amount from BigInt to number (assuming 18 decimals for most tokens)
+    const tokenDecimals = 18; // TODO: Could fetch from token contract if needed
+    const transferAmount =
+      Number(donationTransfer.amount) / 10 ** tokenDecimals;
+
+    // Determine the currency symbol
+    // For native tokens, use the network's native currency (ETH, MATIC, etc.)
+    let currency = symbol;
+    if (donationTransfer.isNativeToken) {
+      const networkConfig = getNetworkConfig(networkId);
+      currency = networkConfig.nativeCurrency?.symbol || symbol;
+    }
+
+    const transactionInfo: NetworkTransactionInfo = {
+      hash: tx.hash,
+      amount: transferAmount,
+      nonce: tx.nonce,
+      from: donationTransfer.from, // The actual sender of this specific transfer
+      to: donationTransfer.to, // The recipient of this specific transfer
+      currency,
+      timestamp,
+      status: TransactionStatus.SUCCESS,
+      blockNumber: tx.blockNumber || undefined,
+      gasUsed: receipt.gasUsed.toString(),
+      gasPrice: tx.gasPrice?.toString(),
+    };
+
+    logger.debug('Donation handler transaction info retrieved', {
+      hash: transactionInfo.hash,
+      from: transactionInfo.from,
+      to: transactionInfo.to,
+      amount: transactionInfo.amount,
+      tokenAddress: donationTransfer.tokenAddress,
+      isNativeToken: donationTransfer.isNativeToken,
+    });
+
+    return transactionInfo;
+  }
+
   async isSwapTransactionToAddress(
     networkId: number,
     txHash: string,
@@ -100,43 +420,27 @@ export class EvmTransactionService implements IChainHandler {
         return false;
       }
 
-      const transferEventSignature =
-        '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+      const transfers = this.parseTransferEvents(receipt.logs);
+      const hasTransferToAddress = transfers.some(
+        (t) => t.to.toLowerCase() === toAddress.toLowerCase(),
+      );
 
-      for (const log of receipt.logs) {
-        try {
-          if (
-            log.topics[0] === transferEventSignature &&
-            log.topics.length >= 3
-          ) {
-            const transferToAddress = '0x' + log.topics[2].substring(26);
-
-            if (transferToAddress.toLowerCase() === toAddress.toLowerCase()) {
-              logger.debug(
-                'Found transfer to target address in swap transaction',
-                {
-                  txHash,
-                  toAddress,
-                  transferToAddress,
-                },
-              );
-              return true;
-            }
-          }
-        } catch (error) {
-          logger.debug('Error parsing log in swap transaction validation', {
-            error: error instanceof Error ? error.message : 'Unknown error',
-            log,
-          });
-          continue;
-        }
+      if (hasTransferToAddress) {
+        logger.debug('Found transfer to target address in swap transaction', {
+          txHash,
+          toAddress,
+        });
+      } else {
+        logger.debug(
+          'No transfer to target address found in swap transaction',
+          {
+            txHash,
+            toAddress,
+          },
+        );
       }
 
-      logger.debug('No transfer to target address found in swap transaction', {
-        txHash,
-        toAddress,
-      });
-      return false;
+      return hasTransferToAddress;
     } catch (error) {
       logger.error('Error validating swap transaction', {
         error: error instanceof Error ? error.message : 'Unknown error',
@@ -188,6 +492,15 @@ export class EvmTransactionService implements IChainHandler {
           `Transaction failed on blockchain: ${txHash}`,
           { txHash, networkId },
         );
+      }
+
+      // Check if this transaction is to a donation handler contract
+      if (tx.to && isDonationHandlerAddress(networkId, tx.to)) {
+        logger.debug('Transaction is to a donation handler contract', {
+          txHash,
+          donationHandler: tx.to,
+        });
+        return this.getDonationHandlerTransactionInfo(input);
       }
 
       const block = receipt

@@ -16,3 +16,4 @@ export const config = {
 };
 
 export * from './networks';
+export * from './donationHandlers';

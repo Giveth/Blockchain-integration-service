@@ -438,6 +438,68 @@ Gets the Unix timestamp of a transaction.
 
 ---
 
+## Donation Handler Support
+
+The service supports verifying donations made through donation handler contracts (batch donation contracts). When a transaction is made to a known donation handler contract, the service automatically:
+
+1. Detects that the transaction is to a donation handler
+2. Parses event logs from the transaction (Transfer events for ERC-20, DonationMade events for native tokens)
+3. Finds the specific transfer matching the expected recipient address
+4. Extracts the correct amount for that specific donation
+
+### Supported Methods
+
+| Method | Description |
+|--------|-------------|
+| `donateManyERC20` | Batch ERC-20 token donations to multiple recipients |
+| `donateManyEth` | Batch native token (ETH/MATIC/etc.) donations to multiple recipients |
+
+### Supported Donation Handlers
+
+| Network | Contract Address |
+|---------|-----------------|
+| Polygon | `0x6e349C56F512cB4250276BF36335c8dd618944A1` |
+
+### How It Works
+
+#### ERC-20 Donations (donateManyERC20)
+
+For transactions like [this Polygon example](https://polygonscan.com/tx/0xc03e14920a8e27a9c791682f58bd8fcd1a67f00fdc47f12f7c0838ce1c3a1bda), where a single transaction distributes tokens to multiple recipients:
+
+1. The `donateManyERC20` function is called on the donation handler contract
+2. The handler distributes tokens to multiple recipients in one transaction
+3. When verifying, the service parses all Transfer events
+4. It finds the transfer matching the `toAddress` from the verification input
+5. The amount and from address are extracted from that specific transfer
+
+#### Native Token Donations (donateManyEth)
+
+For native token batch donations:
+
+1. The `donateManyEth` function is called with native value (ETH/MATIC)
+2. The handler distributes native tokens to multiple recipients
+3. When verifying, the service parses `DonationMade` events from the logs
+4. It finds the donation matching the `toAddress` from the verification input
+5. The amount is extracted and the network's native currency symbol is used
+
+### Adding New Donation Handlers
+
+To add support for new donation handler contracts, update the configuration in `src/config/donationHandlers.ts`:
+
+```typescript
+export const DONATION_HANDLER_ADDRESSES: Record<number, string[]> = {
+  [NetworkId.POLYGON]: [
+    '0x6e349C56F512cB4250276BF36335c8dd618944A1', // Existing handler
+    '0xNEW_HANDLER_ADDRESS', // Add new handlers here
+  ],
+  [NetworkId.MAINNET]: [
+    '0xMAINNET_HANDLER_ADDRESS', // Add mainnet handlers
+  ],
+};
+```
+
+---
+
 ## Chain-Specific Services
 
 ### EVM Transaction Service
