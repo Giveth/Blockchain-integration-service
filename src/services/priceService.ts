@@ -24,7 +24,8 @@ const NATIVE_TOKEN_IDS: Record<string, string> = {
   BNB: 'binancecoin',
   AVAX: 'avalanche-2',
   CELO: 'celo',
-  xDAI: 'xdai',
+  XDAI: 'xdai', // Native token on Gnosis Chain
+  DAI: 'dai',
   SOL: 'solana',
 };
 
