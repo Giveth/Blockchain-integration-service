@@ -39,6 +39,49 @@ export class SolanaTransactionService implements IChainHandler {
     return this.connections.get(networkId)!;
   }
 
+  async getTransactionTimestamp(
+    txHash: string,
+    networkId: number,
+  ): Promise<number> {
+    try {
+      logger.debug('Fetching Solana transaction timestamp', {
+        txHash,
+        networkId,
+      });
+
+      const connection = this.getConnection(networkId);
+      const transaction = await connection.getParsedTransaction(txHash, {
+        maxSupportedTransactionVersion: 0,
+      });
+
+      if (!transaction) {
+        throw new BlockchainError(
+          BlockchainErrorCode.TRANSACTION_NOT_FOUND,
+          `Transaction not found: ${txHash}`,
+          { txHash, networkId },
+        );
+      }
+
+      return transaction.blockTime || Math.floor(Date.now() / 1000);
+    } catch (error) {
+      if (error instanceof BlockchainError) {
+        throw error;
+      }
+
+      logger.error('Error fetching Solana transaction timestamp', {
+        error,
+        txHash,
+        networkId,
+      });
+
+      throw new BlockchainError(
+        BlockchainErrorCode.NETWORK_ERROR,
+        `Failed to fetch Solana transaction timestamp: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        { txHash, networkId },
+      );
+    }
+  }
+
   async getTransactionInfo(
     input: TransactionDetailInput,
   ): Promise<NetworkTransactionInfo> {

@@ -5,7 +5,10 @@ import {
   BlockchainError,
   BlockchainErrorCode,
 } from '../types';
-import { getTransactionInfoFromNetwork } from './chains';
+import {
+  getTransactionInfoFromNetwork,
+  getTransactionTimestampFromNetwork,
+} from './chains';
 import { safeTransactionService } from './safe';
 import { logger } from '../utils/logger';
 import {
@@ -229,17 +232,12 @@ export class TransactionVerificationService {
     logger.debug('Fetching transaction timestamp', { txHash, networkId });
 
     try {
-      const transaction = await getTransactionInfoFromNetwork({
+      // Use direct timestamp fetching to bypass donation handler logic
+      const timestamp = await getTransactionTimestampFromNetwork(
         txHash,
         networkId,
-        symbol: '',
-        fromAddress: '',
-        toAddress: '',
-        amount: 0,
-        timestamp: 0,
-      });
-
-      return transaction.timestamp;
+      );
+      return timestamp;
     } catch (error) {
       logger.error('Error fetching transaction timestamp', {
         error,

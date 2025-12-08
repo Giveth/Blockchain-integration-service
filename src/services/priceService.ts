@@ -19,7 +19,8 @@ const COINGECKO_PLATFORM_IDS: Record<number, string> = {
 // Native token CoinGecko IDs
 const NATIVE_TOKEN_IDS: Record<string, string> = {
   ETH: 'ethereum',
-  MATIC: 'matic-network',
+  MATIC: 'polygon-ecosystem-token', // MATIC was rebranded to POL
+  POL: 'polygon-ecosystem-token',
   BNB: 'binancecoin',
   AVAX: 'avalanche-2',
   CELO: 'celo',
