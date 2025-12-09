@@ -19,8 +19,9 @@ const TRANSFER_EVENT_SIGNATURE =
 
 // DonationMade event signature from DonationHandler contract
 // DonationMade(address indexed recipientAddress, uint256 amount, address indexed tokenAddress, bytes data)
+// keccak256("DonationMade(address,uint256,address,bytes)")
 const DONATION_MADE_EVENT_SIGNATURE =
-  '0x6b1cbfbbaec984cbf08e8eda37ef0ae09c9b6dd3db0b9a048cb8b47e63c0f939';
+  '0x428e1190dfef997f3ac8da6afa80e330fc785bafb1febed9109598bfeee45ec0';
 
 // Native token address (used in DonationMade events for ETH/MATIC donations)
 const NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -246,6 +247,28 @@ export class EvmTransactionService implements IChainHandler {
   }
 
   /**
+   * Check if a symbol represents the native currency of a network
+   * Handles both old (MATIC) and new (POL) naming for Polygon
+   */
+  private isNativeCurrencySymbol(networkId: number, symbol: string): boolean {
+    const networkConfig = getNetworkConfig(networkId);
+    const nativeSymbol = networkConfig.nativeCurrency?.symbol?.toUpperCase();
+    const upperSymbol = symbol.toUpperCase();
+
+    // Direct match
+    if (upperSymbol === nativeSymbol) {
+      return true;
+    }
+
+    // Handle Polygon's MATIC/POL naming (both refer to native token)
+    if (networkId === 137) {
+      return upperSymbol === 'MATIC' || upperSymbol === 'POL';
+    }
+
+    return false;
+  }
+
+  /**
    * Get transaction info for a donation handler transaction
    * Parses the logs to find the specific transfer to the recipient
    * Supports both ERC-20 donations (donateManyERC20) and native token donations (donateManyEth)
@@ -292,70 +315,90 @@ export class EvmTransactionService implements IChainHandler {
       );
     }
 
-    // Check if this is a native token donation (donateManyEth)
-    // Native token donations have tx.value > 0 and we should parse DonationMade events
-    const isNativeTokenDonation = tx.value.gt(0);
+    // Determine if the expected token is native currency
+    const expectsNativeToken = this.isNativeCurrencySymbol(networkId, symbol);
+
+    logger.debug('Token type expectation', {
+      txHash,
+      symbol,
+      expectsNativeToken,
+    });
 
     let donationTransfer: DonationTransferInfo | null = null;
 
-    if (isNativeTokenDonation) {
-      // Parse DonationMade events for native token donations
-      const donations = this.parseDonationMadeEvents(receipt.logs, tx.from);
+    // Parse all DonationMade events
+    const allDonations = this.parseDonationMadeEvents(receipt.logs, tx.from);
 
-      logger.debug('Parsed DonationMade events from donation handler', {
-        txHash,
-        donationCount: donations.length,
-        toAddress,
-        isNativeTokenDonation: true,
-      });
+    logger.debug('Parsed DonationMade events from donation handler', {
+      txHash,
+      donationCount: allDonations.length,
+      toAddress,
+      nativeDonationCount: allDonations.filter((d) => d.isNativeToken).length,
+      erc20DonationCount: allDonations.filter((d) => !d.isNativeToken).length,
+    });
 
-      // Filter for native token donations only
-      const nativeDonations = donations.filter((d) => d.isNativeToken);
-
+    if (expectsNativeToken) {
+      // User expects native token - ONLY accept native token donations
+      const nativeDonations = allDonations.filter((d) => d.isNativeToken);
       donationTransfer = this.findDonationTransfer(
         nativeDonations,
         toAddress,
         amount,
       );
-    }
 
-    // If no native token donation found, try ERC-20 Transfer events
-    if (!donationTransfer) {
-      const transfers = this.parseTransferEvents(receipt.logs);
-
-      logger.debug('Parsed Transfer events from donation handler', {
-        txHash,
-        transferCount: transfers.length,
-        toAddress,
-      });
-
+      if (!donationTransfer) {
+        throw new BlockchainError(
+          BlockchainErrorCode.TO_ADDRESS_MISMATCH,
+          `No native token (${symbol}) transfer found to recipient ${toAddress} in donation handler transaction. The transaction may contain ERC-20 transfers instead.`,
+          {
+            txHash,
+            networkId,
+            expectedTo: toAddress,
+            expectedToken: symbol,
+            expectedTokenType: 'native',
+          },
+        );
+      }
+    } else {
+      // User expects ERC-20 token - look for ERC-20 transfers
+      // First try DonationMade events for ERC-20 tokens
+      const erc20Donations = allDonations.filter((d) => !d.isNativeToken);
       donationTransfer = this.findDonationTransfer(
-        transfers,
+        erc20Donations,
         toAddress,
         amount,
       );
-    }
 
-    // If still no transfer found, try all DonationMade events (might be ERC-20 via DonationMade)
-    if (!donationTransfer) {
-      const allDonations = this.parseDonationMadeEvents(receipt.logs, tx.from);
-      donationTransfer = this.findDonationTransfer(
-        allDonations,
-        toAddress,
-        amount,
-      );
-    }
+      // If not found in DonationMade events, try Transfer events
+      if (!donationTransfer) {
+        const transfers = this.parseTransferEvents(receipt.logs);
 
-    if (!donationTransfer) {
-      throw new BlockchainError(
-        BlockchainErrorCode.TO_ADDRESS_MISMATCH,
-        `No transfer found to recipient ${toAddress} in donation handler transaction`,
-        {
+        logger.debug('Parsed Transfer events from donation handler', {
           txHash,
-          networkId,
-          expectedTo: toAddress,
-        },
-      );
+          transferCount: transfers.length,
+          toAddress,
+        });
+
+        donationTransfer = this.findDonationTransfer(
+          transfers,
+          toAddress,
+          amount,
+        );
+      }
+
+      if (!donationTransfer) {
+        throw new BlockchainError(
+          BlockchainErrorCode.TO_ADDRESS_MISMATCH,
+          `No ERC-20 token transfer found to recipient ${toAddress} in donation handler transaction`,
+          {
+            txHash,
+            networkId,
+            expectedTo: toAddress,
+            expectedToken: symbol,
+            expectedTokenType: 'ERC-20',
+          },
+        );
+      }
     }
 
     const block = await provider.getBlock(receipt.blockNumber);

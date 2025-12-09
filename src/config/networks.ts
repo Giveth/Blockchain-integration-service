@@ -20,8 +20,8 @@ export const NETWORK_CONFIGS: Record<number, NetworkConfig> = {
     rpcUrl: process.env.POLYGON_RPC_URL,
     blockExplorerUrl: 'https://polygonscan.com',
     nativeCurrency: {
-      name: 'MATIC',
-      symbol: 'MATIC',
+      name: 'POL',
+      symbol: 'POL',
       decimals: 18,
     },
   },
