@@ -26,6 +26,9 @@ const DONATION_MADE_EVENT_SIGNATURE =
 // Native token address (used in DonationMade events for ETH/MATIC donations)
 const NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
 
+// Minimal ERC-20 ABI for symbol() function
+const ERC20_ABI = ['function symbol() view returns (string)'];
+
 export interface DonationTransferInfo {
   from: string;
   to: string;
@@ -61,6 +64,28 @@ export class EvmTransactionService implements IChainHandler {
       this.providers.set(networkId, provider);
     }
     return this.providers.get(networkId)!;
+  }
+
+  /**
+   * Fetch the symbol of an ERC-20 token from the blockchain
+   */
+  async getTokenSymbol(
+    networkId: number,
+    tokenAddress: string,
+  ): Promise<string | null> {
+    try {
+      const provider = this.getProvider(networkId);
+      const contract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
+      const symbol = await contract.symbol();
+      return symbol;
+    } catch (error) {
+      logger.warn('Failed to fetch token symbol', {
+        tokenAddress,
+        networkId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      return null;
+    }
   }
 
   async getTransactionTimestamp(
@@ -276,13 +301,15 @@ export class EvmTransactionService implements IChainHandler {
   async getDonationHandlerTransactionInfo(
     input: TransactionDetailInput,
   ): Promise<NetworkTransactionInfo> {
-    const { txHash, networkId, toAddress, amount, symbol } = input;
+    const { txHash, networkId, toAddress, amount, symbol, tokenAddress } =
+      input;
 
     logger.debug('Getting donation handler transaction info', {
       txHash,
       networkId,
       toAddress,
       symbol,
+      tokenAddress,
     });
 
     const provider = this.getProvider(networkId);
@@ -318,10 +345,66 @@ export class EvmTransactionService implements IChainHandler {
     // Determine if the expected token is native currency
     const expectsNativeToken = this.isNativeCurrencySymbol(networkId, symbol);
 
+    // For non-native tokens, tokenAddress is required
+    if (!expectsNativeToken && !tokenAddress) {
+      throw new BlockchainError(
+        BlockchainErrorCode.TOKEN_MISMATCH,
+        `Token address is required for ERC-20 token verification (symbol: ${symbol})`,
+        {
+          txHash,
+          networkId,
+          symbol,
+          message:
+            'For non-native token donations, please provide the token contract address',
+        },
+      );
+    }
+
+    // For non-native tokens, validate that the symbol matches the token contract
+    if (!expectsNativeToken && tokenAddress) {
+      const actualSymbol = await this.getTokenSymbol(networkId, tokenAddress);
+
+      if (actualSymbol) {
+        const normalizedExpectedSymbol = symbol.toUpperCase();
+        const normalizedActualSymbol = actualSymbol.toUpperCase();
+
+        if (normalizedExpectedSymbol !== normalizedActualSymbol) {
+          throw new BlockchainError(
+            BlockchainErrorCode.TOKEN_MISMATCH,
+            `Token symbol mismatch: expected ${symbol}, but token contract ${tokenAddress} has symbol ${actualSymbol}`,
+            {
+              txHash,
+              networkId,
+              expectedSymbol: symbol,
+              actualSymbol,
+              tokenAddress,
+            },
+          );
+        }
+
+        logger.debug('Token symbol validated', {
+          txHash,
+          tokenAddress,
+          expectedSymbol: symbol,
+          actualSymbol,
+        });
+      } else {
+        logger.warn(
+          'Could not fetch token symbol for validation, proceeding with address-based validation only',
+          {
+            txHash,
+            tokenAddress,
+            expectedSymbol: symbol,
+          },
+        );
+      }
+    }
+
     logger.debug('Token type expectation', {
       txHash,
       symbol,
       expectsNativeToken,
+      tokenAddress: tokenAddress || null,
     });
 
     let donationTransfer: DonationTransferInfo | null = null;
@@ -361,8 +444,20 @@ export class EvmTransactionService implements IChainHandler {
       }
     } else {
       // User expects ERC-20 token - look for ERC-20 transfers
+      // Filter by token address if provided
+      const normalizedExpectedTokenAddress = tokenAddress?.toLowerCase();
+
       // First try DonationMade events for ERC-20 tokens
-      const erc20Donations = allDonations.filter((d) => !d.isNativeToken);
+      let erc20Donations = allDonations.filter((d) => !d.isNativeToken);
+
+      // If token address is provided, filter by it
+      if (normalizedExpectedTokenAddress) {
+        erc20Donations = erc20Donations.filter(
+          (d) =>
+            d.tokenAddress.toLowerCase() === normalizedExpectedTokenAddress,
+        );
+      }
+
       donationTransfer = this.findDonationTransfer(
         erc20Donations,
         toAddress,
@@ -371,12 +466,21 @@ export class EvmTransactionService implements IChainHandler {
 
       // If not found in DonationMade events, try Transfer events
       if (!donationTransfer) {
-        const transfers = this.parseTransferEvents(receipt.logs);
+        let transfers = this.parseTransferEvents(receipt.logs);
+
+        // If token address is provided, filter by it
+        if (normalizedExpectedTokenAddress) {
+          transfers = transfers.filter(
+            (t) =>
+              t.tokenAddress.toLowerCase() === normalizedExpectedTokenAddress,
+          );
+        }
 
         logger.debug('Parsed Transfer events from donation handler', {
           txHash,
           transferCount: transfers.length,
           toAddress,
+          filterByTokenAddress: !!normalizedExpectedTokenAddress,
         });
 
         donationTransfer = this.findDonationTransfer(
@@ -387,15 +491,38 @@ export class EvmTransactionService implements IChainHandler {
       }
 
       if (!donationTransfer) {
+        const errorMessage = normalizedExpectedTokenAddress
+          ? `No ERC-20 token transfer found to recipient ${toAddress} with token ${tokenAddress} in donation handler transaction`
+          : `No ERC-20 token transfer found to recipient ${toAddress} in donation handler transaction`;
+
         throw new BlockchainError(
           BlockchainErrorCode.TO_ADDRESS_MISMATCH,
-          `No ERC-20 token transfer found to recipient ${toAddress} in donation handler transaction`,
+          errorMessage,
           {
             txHash,
             networkId,
             expectedTo: toAddress,
             expectedToken: symbol,
+            expectedTokenAddress: tokenAddress || undefined,
             expectedTokenType: 'ERC-20',
+          },
+        );
+      }
+
+      // Additional validation: if token address was provided, verify the found transfer matches
+      if (
+        normalizedExpectedTokenAddress &&
+        donationTransfer.tokenAddress.toLowerCase() !==
+          normalizedExpectedTokenAddress
+      ) {
+        throw new BlockchainError(
+          BlockchainErrorCode.TOKEN_MISMATCH,
+          `Token address mismatch: expected ${tokenAddress}, but found transfer from ${donationTransfer.tokenAddress}`,
+          {
+            txHash,
+            networkId,
+            expectedTokenAddress: tokenAddress,
+            actualTokenAddress: donationTransfer.tokenAddress,
           },
         );
       }

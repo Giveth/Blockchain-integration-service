@@ -83,6 +83,7 @@ export interface TransactionDetailInput {
   chainType?: ChainType;
   isSwap?: boolean;
   importedFromDraftOrBackupService?: boolean;
+  tokenAddress?: string | null;
 }
 
 export interface TransactionValidationResult {
@@ -108,6 +109,7 @@ export interface TransactionVerificationInput {
   safeTxHash?: string;
   isSwap?: boolean;
   importedFromDraftOrBackupService?: boolean;
+  tokenAddress?: string | null;
 }
 
 /**

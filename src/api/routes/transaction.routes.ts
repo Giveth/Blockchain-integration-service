@@ -25,6 +25,7 @@ const verifyTransactionSchema = Joi.object({
   chainType: Joi.string().optional(),
   isSwap: Joi.boolean().optional(),
   importedFromDraftOrBackupService: Joi.boolean().optional(),
+  tokenAddress: Joi.string().allow(null).optional(),
 });
 
 const batchVerifyTransactionSchema = Joi.object({
