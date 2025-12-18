@@ -11,7 +11,6 @@ docs
 src/tests
 .eslintrc.json
 .prettierrc
-tsconfig.json
 LICENSE
 PROJECT_SUMMARY.md
 
