@@ -1,51 +1,178 @@
 name: Build and Push Docker Image (Staging)
 
 on:
-    push:
-        branches:
-            - staging
+  push:
+    branches:
+      - staging
 
 env:
-    REGISTRY: ghcr.io
-    IMAGE_NAME: ${{ github.repository }}
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-    build-and-push:
-        runs-on: ubuntu-latest
-        permissions:
-            contents: read
-            packages: write
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.image-tag.outputs.tag }}
 
-        steps:
-            - name: Checkout repository
-              uses: actions/checkout@v4
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-            - name: Set up Docker Buildx
-              uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-            - name: Log in to Container Registry
-              uses: docker/login-action@v3
-              with:
-                  registry: ${{ env.REGISTRY }}
-                  username: ${{ github.actor }}
-                  password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-            - name: Extract metadata (tags, labels)
-              id: meta
-              uses: docker/metadata-action@v5
-              with:
-                  images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-                  tags: |
-                      type=ref,event=branch
-                      type=sha,prefix=staging-
-                      type=raw,value=staging-latest
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=staging-
+            type=raw,value=staging-latest
 
-            - name: Build and push Docker image
-              uses: docker/build-push-action@v5
-              with:
-                  context: .
-                  push: true
-                  tags: ${{ steps.meta.outputs.tags }}
-                  labels: ${{ steps.meta.outputs.labels }}
-                  cache-from: type=gha
-                  cache-to: type=gha,mode=max
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Output image tag
+        id: image-tag
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging-${SHORT_SHA}"
+          echo "Image tag: ${IMAGE_TAG}"
+          echo "tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: build-and-push
+    if: ${{ needs.build-and-push.result == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Debug image tag
+        run: |
+          echo "Build output tag: ${{ needs.build-and-push.outputs.image_tag }}"
+          echo "Final BLOCKCHAIN_IMAGE will be: ${{ needs.build-and-push.outputs.image_tag || format('{0}/{1}:staging-latest', env.REGISTRY, env.IMAGE_NAME) }}"
+
+      - name: Deploy to staging server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: core.v6-staging.giveth.io
+          username: devops
+          key: ${{ secrets.STAGING_HOST_PRIVATEKEY }}
+          envs: GHCR_TOKEN,GHCR_USER,BLOCKCHAIN_IMAGE
+          script: |
+            set -e
+            cd ~/giveth-v6-deploy
+            git pull origin main
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            # Save the image tag from CI before sourcing .env
+            CI_BLOCKCHAIN_IMAGE="$BLOCKCHAIN_IMAGE"
+            set -a && source .env && set +a
+            # Override with the CI-provided image tag
+            export BLOCKCHAIN_IMAGE="$CI_BLOCKCHAIN_IMAGE"
+            echo "Deploying with image: $BLOCKCHAIN_IMAGE"
+            docker stack deploy -c docker-compose-staging.yml v6-staging --with-registry-auth --resolve-image always
+
+            echo "Monitoring deployment health..."
+            MAX_ATTEMPTS=24
+            SLEEP_INTERVAL=10
+            SERVICE_NAME="v6-staging-blockchain"
+            DESIRED_REPLICAS=1
+
+            # Extract the short image tag we're deploying (e.g., staging-87c452d)
+            DEPLOY_TAG=$(echo "$BLOCKCHAIN_IMAGE" | grep -oE 'staging-[a-f0-9]+$')
+            echo "Waiting for containers with image tag: $DEPLOY_TAG"
+
+            for i in $(seq 1 $MAX_ATTEMPTS); do
+              echo ""
+              echo "Health check attempt $i/$MAX_ATTEMPTS..."
+
+              # Count containers running with the NEW image that are healthy
+              NEW_IMAGE_HEALTHY=$(docker ps --filter "name=v6-staging-blockchain" --filter "health=healthy" --format "{{.Image}}" | grep -c "$DEPLOY_TAG" || true)
+              NEW_IMAGE_STARTING=$(docker ps --filter "name=v6-staging-blockchain" --filter "health=starting" --format "{{.Image}}" | grep -c "$DEPLOY_TAG" || true)
+              NEW_IMAGE_RUNNING=$(docker ps --filter "name=v6-staging-blockchain" --format "{{.Image}}" | grep -c "$DEPLOY_TAG" || true)
+
+              # Count old containers still running
+              OLD_CONTAINERS=$(docker ps --filter "name=v6-staging-blockchain" --format "{{.Image}}" | grep -v "$DEPLOY_TAG" | wc -l | tr -d ' ')
+
+              # Check for failures with the new image
+              NEW_IMAGE_FAILURES=$(docker service ps $SERVICE_NAME --format "{{.Image}} {{.CurrentState}}" | grep "$DEPLOY_TAG" | grep -c "Failed" || true)
+
+              echo "New image ($DEPLOY_TAG): Running=$NEW_IMAGE_RUNNING, Healthy=$NEW_IMAGE_HEALTHY, Starting=$NEW_IMAGE_STARTING, Failed=$NEW_IMAGE_FAILURES"
+              echo "Old containers still running: $OLD_CONTAINERS"
+
+              # Success: all replicas running new image and healthy
+              if [ "$NEW_IMAGE_HEALTHY" -ge "$DESIRED_REPLICAS" ] && [ "$NEW_IMAGE_STARTING" -eq 0 ]; then
+                echo ""
+                echo "✅ Deployment successful! $NEW_IMAGE_HEALTHY containers with new image are healthy."
+
+                if [ "$OLD_CONTAINERS" -gt 0 ]; then
+                  echo "⚠️  $OLD_CONTAINERS old containers still running (Swarm will drain them)"
+                fi
+
+                docker service ps $SERVICE_NAME --no-trunc | head -20
+
+                # Clean up old containers and images
+                echo ""
+                echo "Cleaning up..."
+                docker container prune -f
+                docker image prune -af --filter "until=24h"
+                exit 0
+              fi
+
+              # Failure: too many failures with new image
+              if [ "$NEW_IMAGE_FAILURES" -ge 4 ]; then
+                echo ""
+                echo "❌ Deployment failed! New image containers keep crashing."
+                echo ""
+                echo "=== Service task history ==="
+                docker service ps $SERVICE_NAME --no-trunc | head -20
+                echo ""
+                echo "=== Logs from failed container ==="
+                FAILED_CONTAINER=$(docker ps -a --filter "name=v6-staging-blockchain" --filter "status=exited" --format "{{.ID}}" | head -1)
+                if [ -n "$FAILED_CONTAINER" ]; then
+                  docker logs --tail 100 "$FAILED_CONTAINER"
+                fi
+                exit 1
+              fi
+
+              sleep $SLEEP_INTERVAL
+            done
+
+            echo ""
+            echo "❌ Deployment timed out waiting for new containers to become healthy."
+            echo ""
+            echo "=== Current container status ==="
+            docker ps --filter "name=v6-staging-blockchain" --format "table {{.ID}}\t{{.Image}}\t{{.Status}}"
+            echo ""
+            echo "=== Service task history ==="
+            docker service ps $SERVICE_NAME --no-trunc | head -20
+            FAILED_CONTAINER=$(docker ps -a --filter "name=v6-staging-blockchain" --filter "status=exited" --format "{{.ID}}" | head -1)
+            if [ -n "$FAILED_CONTAINER" ]; then
+              echo ""
+              echo "=== Logs from most recent exited container ==="
+              docker logs --tail 100 "$FAILED_CONTAINER"
+            fi
+            exit 1
+    env:
+      GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+      GHCR_USER: ${{ github.actor }}
+      BLOCKCHAIN_IMAGE: ${{ needs.build-and-push.outputs.image_tag || format('{0}/{1}:staging-latest', 'ghcr.io', github.repository) }}
