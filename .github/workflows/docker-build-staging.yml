@@ -100,7 +100,7 @@ jobs:
             echo "Monitoring deployment health..."
             MAX_ATTEMPTS=24
             SLEEP_INTERVAL=10
-            SERVICE_NAME="v6-staging-blockchain"
+            SERVICE_NAME="v6-staging_blockchain"
             DESIRED_REPLICAS=1
 
             # Extract the short image tag we're deploying (e.g., staging-87c452d)
@@ -112,12 +112,12 @@ jobs:
               echo "Health check attempt $i/$MAX_ATTEMPTS..."
 
               # Count containers running with the NEW image that are healthy
-              NEW_IMAGE_HEALTHY=$(docker ps --filter "name=v6-staging-blockchain" --filter "health=healthy" --format "{{.Image}}" | grep -c "$DEPLOY_TAG" || true)
-              NEW_IMAGE_STARTING=$(docker ps --filter "name=v6-staging-blockchain" --filter "health=starting" --format "{{.Image}}" | grep -c "$DEPLOY_TAG" || true)
-              NEW_IMAGE_RUNNING=$(docker ps --filter "name=v6-staging-blockchain" --format "{{.Image}}" | grep -c "$DEPLOY_TAG" || true)
+              NEW_IMAGE_HEALTHY=$(docker ps --filter "name=v6-staging_blockchain" --filter "health=healthy" --format "{{.Image}}" | grep -c "$DEPLOY_TAG" || true)
+              NEW_IMAGE_STARTING=$(docker ps --filter "name=v6-staging_blockchain" --filter "health=starting" --format "{{.Image}}" | grep -c "$DEPLOY_TAG" || true)
+              NEW_IMAGE_RUNNING=$(docker ps --filter "name=v6-staging_blockchain" --format "{{.Image}}" | grep -c "$DEPLOY_TAG" || true)
 
               # Count old containers still running
-              OLD_CONTAINERS=$(docker ps --filter "name=v6-staging-blockchain" --format "{{.Image}}" | grep -v "$DEPLOY_TAG" | wc -l | tr -d ' ')
+              OLD_CONTAINERS=$(docker ps --filter "name=v6-staging_blockchain" --format "{{.Image}}" | grep -v "$DEPLOY_TAG" | wc -l | tr -d ' ')
 
               # Check for failures with the new image
               NEW_IMAGE_FAILURES=$(docker service ps $SERVICE_NAME --format "{{.Image}} {{.CurrentState}}" | grep "$DEPLOY_TAG" | grep -c "Failed" || true)
@@ -153,7 +153,7 @@ jobs:
                 docker service ps $SERVICE_NAME --no-trunc | head -20
                 echo ""
                 echo "=== Logs from failed container ==="
-                FAILED_CONTAINER=$(docker ps -a --filter "name=v6-staging-blockchain" --filter "status=exited" --format "{{.ID}}" | head -1)
+                FAILED_CONTAINER=$(docker ps -a --filter "name=v6-staging_blockchain" --filter "status=exited" --format "{{.ID}}" | head -1)
                 if [ -n "$FAILED_CONTAINER" ]; then
                   docker logs --tail 100 "$FAILED_CONTAINER"
                 fi
@@ -167,11 +167,11 @@ jobs:
             echo "❌ Deployment timed out waiting for new containers to become healthy."
             echo ""
             echo "=== Current container status ==="
-            docker ps --filter "name=v6-staging-blockchain" --format "table {{.ID}}\t{{.Image}}\t{{.Status}}"
+            docker ps --filter "name=v6-staging_blockchain" --format "table {{.ID}}\t{{.Image}}\t{{.Status}}"
             echo ""
             echo "=== Service task history ==="
             docker service ps $SERVICE_NAME --no-trunc | head -20
-            FAILED_CONTAINER=$(docker ps -a --filter "name=v6-staging-blockchain" --filter "status=exited" --format "{{.ID}}" | head -1)
+            FAILED_CONTAINER=$(docker ps -a --filter "name=v6-staging_blockchain" --filter "status=exited" --format "{{.ID}}" | head -1)
             if [ -n "$FAILED_CONTAINER" ]; then
               echo ""
               echo "=== Logs from most recent exited container ==="
