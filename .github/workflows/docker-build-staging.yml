@@ -19,6 +19,12 @@ jobs:
       image_tag: ${{ steps.image-tag.outputs.tag }}
 
     steps:
+      - name: Lowercase image name
+        id: lower
+        run: echo "image_name=${IMAGE_NAME,,}" >> $GITHUB_OUTPUT
+        env:
+          IMAGE_NAME: ${{ github.repository }}
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -36,7 +42,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.lower.outputs.image_name }}
           tags: |
             type=ref,event=branch
             type=sha,prefix=staging-
@@ -56,7 +62,7 @@ jobs:
         id: image-tag
         run: |
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging-${SHORT_SHA}"
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ steps.lower.outputs.image_name }}:staging-${SHORT_SHA}"
           echo "Image tag: ${IMAGE_TAG}"
           echo "tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
 
@@ -69,7 +75,7 @@ jobs:
       - name: Debug image tag
         run: |
           echo "Build output tag: ${{ needs.build-and-push.outputs.image_tag }}"
-          echo "Final BLOCKCHAIN_IMAGE will be: ${{ needs.build-and-push.outputs.image_tag || format('{0}/{1}:staging-latest', env.REGISTRY, env.IMAGE_NAME) }}"
+          echo "Final BLOCKCHAIN_IMAGE will be: ${{ needs.build-and-push.outputs.image_tag || 'ghcr.io/giveth/blockchain-integration-service:staging-latest' }}"
 
       - name: Deploy to staging server
         uses: appleboy/ssh-action@v1.0.3
@@ -175,4 +181,4 @@ jobs:
     env:
       GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
       GHCR_USER: ${{ github.actor }}
-      BLOCKCHAIN_IMAGE: ${{ needs.build-and-push.outputs.image_tag || format('{0}/{1}:staging-latest', 'ghcr.io', github.repository) }}
+      BLOCKCHAIN_IMAGE: ${{ needs.build-and-push.outputs.image_tag || 'ghcr.io/giveth/blockchain-integration-service:staging-latest' }}
