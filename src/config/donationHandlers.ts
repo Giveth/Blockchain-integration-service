@@ -6,25 +6,25 @@ import { NetworkId } from '../types';
  */
 export const DONATION_HANDLER_ADDRESSES: Record<number, string[]> = {
   [NetworkId.MAINNET]: [
-    // Add Ethereum mainnet donation handler addresses here
+    '0x97b2cb568e0880B99Cd16EFc6edFF5272Aa02676', // Giveth Donation Handler on Ethereum Mainnet
   ],
   [NetworkId.POLYGON]: [
-    '0x6e349C56F512cB4250276BF36335c8dd618944A1', // Giveth Donation Handler
+    '0x6e349C56F512cB4250276BF36335c8dd618944A1', // Giveth Donation Handler on Polygon
   ],
   [NetworkId.OPTIMISM]: [
-    // Add Optimism donation handler addresses here
+    '0x8D685A56C51Cf54685d3dB0Ea50748D3A2c2e0dC', // Giveth Donation Handler on Optimism
   ],
   [NetworkId.ARBITRUM]: [
-    // Add Arbitrum donation handler addresses here
+    '0x97b2cb568e0880B99Cd16EFc6edFF5272Aa02676', // Giveth Donation Handler on Arbitrum
   ],
   [NetworkId.GNOSIS]: [
-    // Add Gnosis donation handler addresses here
+    '0x97b2cb568e0880B99Cd16EFc6edFF5272Aa02676', // Giveth Donation Handler on Gnosis
   ],
   [NetworkId.CELO]: [
-    // Add Celo donation handler addresses here
+    '0x97b2cb568e0880B99Cd16EFc6edFF5272Aa02676', // Giveth Donation Handler on Celo
   ],
   [NetworkId.BASE]: [
-    // Add Base donation handler addresses here
+    '0x7a5D2A00a25b95fd8739bc52Cd79f8F971C37Ca1', // Giveth Donation Handler on Base
   ],
 };
 
