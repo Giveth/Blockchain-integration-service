@@ -9,8 +9,15 @@ import {
   ChainType,
 } from '../../../types';
 import { getNetworkConfig, getChainType } from '../../../config';
-import { isDonationHandlerAddress } from '../../../config/donationHandlers';
-import { isValidEvmTransactionHash } from '../../../utils/validation';
+import {
+  getDonationHandlerAddresses,
+  isDonationHandlerAddress,
+} from '../../../config/donationHandlers';
+import {
+  closeTo,
+  isValidEvmTransactionHash,
+  normalizeAddress,
+} from '../../../utils/validation';
 import { IChainHandler } from '../IChainHandler';
 
 // ERC-20 Transfer event signature: Transfer(address indexed from, address indexed to, uint256 value)
@@ -26,8 +33,23 @@ const DONATION_MADE_EVENT_SIGNATURE =
 // Native token address (used in DonationMade events for ETH/MATIC donations)
 const NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
 
+// EIP-4337 EntryPoint contracts (v0.6 + v0.7)
+const ERC4337_ENTRYPOINT_ADDRESSES = new Set<string>([
+  '0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789',
+  '0x0000000071727de22e5e9d8baf0edac6f37da032',
+]);
+
 // Minimal ERC-20 ABI for symbol() function
-const ERC20_ABI = ['function symbol() view returns (string)'];
+const ERC20_ABI = [
+  'function symbol() view returns (string)',
+  'function decimals() view returns (uint8)',
+];
+
+interface InternalValueTransfer {
+  from: string;
+  to: string;
+  value: bigint;
+}
 
 export interface DonationTransferInfo {
   from: string;
@@ -86,6 +108,429 @@ export class EvmTransactionService implements IChainHandler {
       });
       return null;
     }
+  }
+
+  /**
+   * Fetch token decimals from an ERC-20 contract.
+   * Falls back to 18 when the contract call fails.
+   */
+  async getTokenDecimals(
+    networkId: number,
+    tokenAddress: string,
+  ): Promise<number> {
+    try {
+      const provider = this.getProvider(networkId);
+      const contract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
+      const decimals = await contract.decimals();
+      return Number(decimals);
+    } catch (error) {
+      logger.warn('Failed to fetch token decimals, using fallback', {
+        tokenAddress,
+        networkId,
+        fallbackDecimals: 18,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      return 18;
+    }
+  }
+
+  private isErc4337EntryPointTx(to?: string | null): boolean {
+    if (!to) {
+      return false;
+    }
+
+    return ERC4337_ENTRYPOINT_ADDRESSES.has(to.toLowerCase());
+  }
+
+  private parseTraceValueToBigInt(value: unknown): bigint {
+    try {
+      if (typeof value === 'bigint') {
+        return value;
+      }
+      if (typeof value === 'number') {
+        if (!Number.isFinite(value) || value <= 0) {
+          return BigInt(0);
+        }
+        return BigInt(Math.floor(value));
+      }
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (!trimmed) {
+          return BigInt(0);
+        }
+        return BigInt(trimmed);
+      }
+      return BigInt(0);
+    } catch {
+      return BigInt(0);
+    }
+  }
+
+  private collectValueTransfersFromCallTrace(
+    traceNode: {
+      from?: unknown;
+      to?: unknown;
+      value?: unknown;
+      calls?: unknown;
+    },
+    transfers: InternalValueTransfer[],
+  ): void {
+    if (!traceNode || typeof traceNode !== 'object') {
+      return;
+    }
+
+    const from =
+      typeof traceNode.from === 'string'
+        ? normalizeAddress(traceNode.from)
+        : '';
+    const to =
+      typeof traceNode.to === 'string' ? normalizeAddress(traceNode.to) : '';
+    const value = this.parseTraceValueToBigInt(traceNode.value);
+
+    if (from && to && value > BigInt(0)) {
+      transfers.push({ from, to, value });
+    }
+
+    if (Array.isArray(traceNode.calls)) {
+      for (const call of traceNode.calls) {
+        this.collectValueTransfersFromCallTrace(call, transfers);
+      }
+    }
+  }
+
+  private async getInternalValueTransfers(
+    networkId: number,
+    txHash: string,
+  ): Promise<InternalValueTransfer[]> {
+    const provider = this.getProvider(networkId);
+
+    try {
+      const debugTraceResult = await provider.send('debug_traceTransaction', [
+        txHash,
+        { tracer: 'callTracer' },
+      ]);
+      const transfers: InternalValueTransfer[] = [];
+      this.collectValueTransfersFromCallTrace(debugTraceResult, transfers);
+      return transfers;
+    } catch (debugTraceError) {
+      logger.debug(
+        'debug_traceTransaction is unavailable, trying trace_transaction',
+        {
+          txHash,
+          networkId,
+          error:
+            debugTraceError instanceof Error
+              ? debugTraceError.message
+              : 'Unknown error',
+        },
+      );
+    }
+
+    try {
+      const traceResult = await provider.send('trace_transaction', [txHash]);
+      const calls = Array.isArray(traceResult) ? traceResult : [];
+      const transfers: InternalValueTransfer[] = [];
+
+      for (const call of calls) {
+        if (!call || typeof call !== 'object') {
+          continue;
+        }
+
+        const action = (call as { action?: unknown }).action;
+        if (!action || typeof action !== 'object') {
+          continue;
+        }
+
+        const typedAction = action as {
+          from?: unknown;
+          to?: unknown;
+          value?: unknown;
+        };
+
+        const from =
+          typeof typedAction.from === 'string'
+            ? normalizeAddress(typedAction.from)
+            : '';
+        const to =
+          typeof typedAction.to === 'string'
+            ? normalizeAddress(typedAction.to)
+            : '';
+        const value = this.parseTraceValueToBigInt(typedAction.value);
+
+        if (from && to && value > BigInt(0)) {
+          transfers.push({ from, to, value });
+        }
+      }
+
+      return transfers;
+    } catch (traceError) {
+      logger.warn(
+        'Failed to fetch internal value transfers from tracing RPCs',
+        {
+          txHash,
+          networkId,
+          error:
+            traceError instanceof Error ? traceError.message : 'Unknown error',
+        },
+      );
+      return [];
+    }
+  }
+
+  private findBestMatchingInternalTransfer(params: {
+    transfers: InternalValueTransfer[];
+    expectedTo: string;
+    expectedFrom?: string;
+    expectedAmount?: number;
+  }): DonationTransferInfo | null {
+    const { transfers, expectedTo, expectedFrom, expectedAmount } = params;
+
+    const expectedToLower = normalizeAddress(expectedTo);
+    const expectedFromLower = expectedFrom
+      ? normalizeAddress(expectedFrom)
+      : null;
+
+    const candidates = transfers
+      .filter((transfer) => transfer.to === expectedToLower)
+      .map((transfer) => {
+        const normalizedAmount = Number(
+          ethers.utils.formatEther(transfer.value.toString()),
+        );
+        const amountMatch =
+          typeof expectedAmount === 'number'
+            ? closeTo(normalizedAmount, expectedAmount, 0.001)
+            : false;
+        const fromMatch = expectedFromLower
+          ? transfer.from === expectedFromLower
+          : false;
+        const score = (amountMatch ? 3 : 0) + (fromMatch ? 2 : 0);
+        return { transfer, score };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const best = candidates[0].transfer;
+    return {
+      from: best.from,
+      to: best.to,
+      amount: best.value,
+      tokenAddress: NATIVE_TOKEN_ADDRESS,
+      isNativeToken: true,
+    };
+  }
+
+  private async resolveAaErc20Transfer(params: {
+    input: TransactionDetailInput;
+    receipt: ethers.providers.TransactionReceipt;
+  }): Promise<{ transfer: DonationTransferInfo; amount: number } | null> {
+    const { input, receipt } = params;
+    const allTransfers = this.parseTransferEvents(receipt.logs);
+    const expectedTo = normalizeAddress(input.toAddress);
+    const expectedFrom = normalizeAddress(input.fromAddress);
+
+    let candidates = allTransfers.filter(
+      (transfer) => normalizeAddress(transfer.to) === expectedTo,
+    );
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const normalizedExpectedTokenAddress = input.tokenAddress
+      ? normalizeAddress(input.tokenAddress)
+      : null;
+
+    if (normalizedExpectedTokenAddress) {
+      candidates = candidates.filter(
+        (transfer) =>
+          normalizeAddress(transfer.tokenAddress) ===
+          normalizedExpectedTokenAddress,
+      );
+    }
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const decimalsCache = new Map<string, number>();
+    const symbolCache = new Map<string, string | null>();
+
+    const scored: Array<{
+      transfer: DonationTransferInfo;
+      score: number;
+      amount: number;
+    }> = [];
+
+    for (const transfer of candidates) {
+      const normalizedTokenAddress = normalizeAddress(transfer.tokenAddress);
+
+      let decimals = decimalsCache.get(normalizedTokenAddress);
+      if (decimals === undefined) {
+        decimals = await this.getTokenDecimals(
+          input.networkId,
+          transfer.tokenAddress,
+        );
+        decimalsCache.set(normalizedTokenAddress, decimals);
+      }
+
+      const amount = Number(
+        ethers.utils.formatUnits(transfer.amount.toString(), decimals),
+      );
+      const amountMatch = closeTo(amount, input.amount, 0.001);
+      const fromMatch = normalizeAddress(transfer.from) === expectedFrom;
+
+      let symbolMatch = true;
+      if (!normalizedExpectedTokenAddress) {
+        let tokenSymbol = symbolCache.get(normalizedTokenAddress);
+        if (tokenSymbol === undefined) {
+          tokenSymbol = await this.getTokenSymbol(
+            input.networkId,
+            transfer.tokenAddress,
+          );
+          symbolCache.set(normalizedTokenAddress, tokenSymbol);
+        }
+        if (tokenSymbol) {
+          symbolMatch =
+            tokenSymbol.toUpperCase() === input.symbol.toUpperCase();
+        }
+      }
+
+      if (!symbolMatch) {
+        continue;
+      }
+
+      const score = (amountMatch ? 3 : 0) + (fromMatch ? 2 : 0);
+      scored.push({ transfer, score, amount });
+    }
+
+    if (scored.length === 0) {
+      return null;
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    return { transfer: scored[0].transfer, amount: scored[0].amount };
+  }
+
+  private async getAccountAbstractionTransactionInfo(
+    input: TransactionDetailInput,
+    tx: ethers.providers.TransactionResponse,
+    receipt: ethers.providers.TransactionReceipt,
+  ): Promise<NetworkTransactionInfo | null> {
+    const { txHash, networkId, symbol } = input;
+    const provider = this.getProvider(networkId);
+    const block = await provider.getBlock(receipt.blockNumber);
+    const timestamp = block?.timestamp || Math.floor(Date.now() / 1000);
+
+    const expectsNativeToken = this.isNativeCurrencySymbol(networkId, symbol);
+
+    if (expectsNativeToken) {
+      const allDonations = this.parseDonationMadeEvents(receipt.logs, tx.from);
+      const nativeDonations = allDonations.filter(
+        (donation) => donation.isNativeToken,
+      );
+      const donationTransfer = this.findDonationTransfer(
+        nativeDonations,
+        input.toAddress,
+        input.amount,
+      );
+
+      const internalTransfers = await this.getInternalValueTransfers(
+        networkId,
+        txHash,
+      );
+
+      if (donationTransfer) {
+        const handlerAddresses = new Set(
+          getDonationHandlerAddresses(networkId).map((address) =>
+            normalizeAddress(address),
+          ),
+        );
+        const expectedFrom = normalizeAddress(input.fromAddress);
+
+        const senderToDonationHandler = internalTransfers
+          .filter((transfer) => handlerAddresses.has(transfer.to))
+          .sort((a, b) => {
+            const aScore = a.from === expectedFrom ? 1 : 0;
+            const bScore = b.from === expectedFrom ? 1 : 0;
+            return bScore - aScore;
+          })[0];
+
+        const inferredFrom = senderToDonationHandler
+          ? senderToDonationHandler.from
+          : normalizeAddress(input.fromAddress);
+        const nativeSymbol = getNetworkConfig(networkId).nativeCurrency.symbol;
+
+        return {
+          hash: tx.hash,
+          amount: Number(
+            ethers.utils.formatEther(donationTransfer.amount.toString()),
+          ),
+          nonce: tx.nonce,
+          from: inferredFrom,
+          to: donationTransfer.to,
+          currency: nativeSymbol,
+          timestamp,
+          status: TransactionStatus.SUCCESS,
+          blockNumber: tx.blockNumber || undefined,
+          gasUsed: receipt.gasUsed.toString(),
+          gasPrice: tx.gasPrice?.toString(),
+        };
+      }
+
+      const nativeTransfer = this.findBestMatchingInternalTransfer({
+        transfers: internalTransfers,
+        expectedTo: input.toAddress,
+        expectedFrom: input.fromAddress,
+        expectedAmount: input.amount,
+      });
+
+      if (!nativeTransfer) {
+        return null;
+      }
+
+      const nativeSymbol = getNetworkConfig(networkId).nativeCurrency.symbol;
+      return {
+        hash: tx.hash,
+        amount: Number(
+          ethers.utils.formatEther(nativeTransfer.amount.toString()),
+        ),
+        nonce: tx.nonce,
+        from: nativeTransfer.from,
+        to: nativeTransfer.to,
+        currency: nativeSymbol,
+        timestamp,
+        status: TransactionStatus.SUCCESS,
+        blockNumber: tx.blockNumber || undefined,
+        gasUsed: receipt.gasUsed.toString(),
+        gasPrice: tx.gasPrice?.toString(),
+      };
+    }
+
+    const resolvedTokenTransfer = await this.resolveAaErc20Transfer({
+      input,
+      receipt,
+    });
+
+    if (!resolvedTokenTransfer) {
+      return null;
+    }
+
+    return {
+      hash: tx.hash,
+      amount: resolvedTokenTransfer.amount,
+      nonce: tx.nonce,
+      from: resolvedTokenTransfer.transfer.from,
+      to: resolvedTokenTransfer.transfer.to,
+      currency: symbol,
+      timestamp,
+      status: TransactionStatus.SUCCESS,
+      blockNumber: tx.blockNumber || undefined,
+      gasUsed: receipt.gasUsed.toString(),
+      gasPrice: tx.gasPrice?.toString(),
+    };
   }
 
   async getTransactionTimestamp(
@@ -671,6 +1116,35 @@ export class EvmTransactionService implements IChainHandler {
           donationHandler: tx.to,
         });
         return this.getDonationHandlerTransactionInfo(input);
+      }
+
+      if (receipt && this.isErc4337EntryPointTx(tx.to)) {
+        logger.info('Detected EIP-4337 EntryPoint transaction', {
+          txHash,
+          networkId,
+          entryPointAddress: tx.to,
+          symbol,
+        });
+
+        const aaTransactionInfo =
+          await this.getAccountAbstractionTransactionInfo(input, tx, receipt);
+
+        if (aaTransactionInfo) {
+          return aaTransactionInfo;
+        }
+
+        throw new BlockchainError(
+          BlockchainErrorCode.TO_ADDRESS_MISMATCH,
+          `Could not resolve donation transfer details from Account Abstraction transaction: ${txHash}`,
+          {
+            txHash,
+            networkId,
+            entryPointAddress: tx.to,
+            expectedTo: input.toAddress,
+            expectedFrom: input.fromAddress,
+            expectedAmount: input.amount,
+          },
+        );
       }
 
       const block = receipt
