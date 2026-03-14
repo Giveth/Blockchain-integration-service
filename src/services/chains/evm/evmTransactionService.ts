@@ -278,13 +278,16 @@ export class EvmTransactionService implements IChainHandler {
   }
 
   private findBestMatchingInternalTransfer(params: {
+    networkId: number;
     transfers: InternalValueTransfer[];
     expectedTo: string;
     expectedFrom?: string;
     expectedAmount?: number;
   }): DonationTransferInfo | null {
-    const { transfers, expectedTo, expectedFrom, expectedAmount } = params;
+    const { networkId, transfers, expectedTo, expectedFrom, expectedAmount } =
+      params;
 
+    const nativeDecimals = getNetworkConfig(networkId).nativeCurrency.decimals;
     const expectedToLower = normalizeAddress(expectedTo);
     const expectedFromLower = expectedFrom
       ? normalizeAddress(expectedFrom)
@@ -294,7 +297,7 @@ export class EvmTransactionService implements IChainHandler {
       .filter((transfer) => transfer.to === expectedToLower)
       .map((transfer) => {
         const normalizedAmount = Number(
-          ethers.utils.formatEther(transfer.value.toString()),
+          ethers.utils.formatUnits(transfer.value.toString(), nativeDecimals),
         );
         const amountMatch =
           typeof expectedAmount === 'number'
@@ -427,6 +430,8 @@ export class EvmTransactionService implements IChainHandler {
     const expectsNativeToken = this.isNativeCurrencySymbol(networkId, symbol);
 
     if (expectsNativeToken) {
+      const nativeDecimals =
+        getNetworkConfig(networkId).nativeCurrency.decimals;
       const allDonations = this.parseDonationMadeEvents(receipt.logs, tx.from);
       const nativeDonations = allDonations.filter(
         (donation) => donation.isNativeToken,
@@ -435,6 +440,7 @@ export class EvmTransactionService implements IChainHandler {
         nativeDonations,
         input.toAddress,
         input.amount,
+        nativeDecimals,
       );
 
       const internalTransfers = await this.getInternalValueTransfers(
@@ -466,7 +472,10 @@ export class EvmTransactionService implements IChainHandler {
         return {
           hash: tx.hash,
           amount: Number(
-            ethers.utils.formatEther(donationTransfer.amount.toString()),
+            ethers.utils.formatUnits(
+              donationTransfer.amount.toString(),
+              nativeDecimals,
+            ),
           ),
           nonce: tx.nonce,
           from: inferredFrom,
@@ -481,6 +490,7 @@ export class EvmTransactionService implements IChainHandler {
       }
 
       const nativeTransfer = this.findBestMatchingInternalTransfer({
+        networkId,
         transfers: internalTransfers,
         expectedTo: input.toAddress,
         expectedFrom: input.fromAddress,
@@ -495,7 +505,10 @@ export class EvmTransactionService implements IChainHandler {
       return {
         hash: tx.hash,
         amount: Number(
-          ethers.utils.formatEther(nativeTransfer.amount.toString()),
+          ethers.utils.formatUnits(
+            nativeTransfer.amount.toString(),
+            nativeDecimals,
+          ),
         ),
         nonce: tx.nonce,
         from: nativeTransfer.from,
@@ -694,7 +707,9 @@ export class EvmTransactionService implements IChainHandler {
     // If multiple transfers and we have an expected amount, find the closest match
     if (expectedAmount !== undefined) {
       const expectedAmountBigInt = BigInt(
-        Math.floor(expectedAmount * 10 ** tokenDecimals),
+        ethers.utils
+          .parseUnits(expectedAmount.toString(), tokenDecimals)
+          .toString(),
       );
 
       // Find transfer with closest amount (within 1% tolerance)
@@ -867,11 +882,14 @@ export class EvmTransactionService implements IChainHandler {
 
     if (expectsNativeToken) {
       // User expects native token - ONLY accept native token donations
+      const nativeDecimals =
+        getNetworkConfig(networkId).nativeCurrency.decimals;
       const nativeDonations = allDonations.filter((d) => d.isNativeToken);
       donationTransfer = this.findDonationTransfer(
         nativeDonations,
         toAddress,
         amount,
+        nativeDecimals,
       );
 
       if (!donationTransfer) {
@@ -889,37 +907,33 @@ export class EvmTransactionService implements IChainHandler {
       }
     } else {
       // User expects ERC-20 token - look for ERC-20 transfers
-      // Filter by token address if provided
-      const normalizedExpectedTokenAddress = tokenAddress?.toLowerCase();
+      // tokenAddress is required for ERC-20 (validated above)
+      const normalizedExpectedTokenAddress = tokenAddress!.toLowerCase();
+      const erc20TokenDecimals = await this.getTokenDecimals(
+        networkId,
+        tokenAddress!,
+      );
 
       // First try DonationMade events for ERC-20 tokens
       let erc20Donations = allDonations.filter((d) => !d.isNativeToken);
-
-      // If token address is provided, filter by it
-      if (normalizedExpectedTokenAddress) {
-        erc20Donations = erc20Donations.filter(
-          (d) =>
-            d.tokenAddress.toLowerCase() === normalizedExpectedTokenAddress,
-        );
-      }
+      erc20Donations = erc20Donations.filter(
+        (d) => d.tokenAddress.toLowerCase() === normalizedExpectedTokenAddress,
+      );
 
       donationTransfer = this.findDonationTransfer(
         erc20Donations,
         toAddress,
         amount,
+        erc20TokenDecimals,
       );
 
       // If not found in DonationMade events, try Transfer events
       if (!donationTransfer) {
         let transfers = this.parseTransferEvents(receipt.logs);
-
-        // If token address is provided, filter by it
-        if (normalizedExpectedTokenAddress) {
-          transfers = transfers.filter(
-            (t) =>
-              t.tokenAddress.toLowerCase() === normalizedExpectedTokenAddress,
-          );
-        }
+        transfers = transfers.filter(
+          (t) =>
+            t.tokenAddress.toLowerCase() === normalizedExpectedTokenAddress,
+        );
 
         logger.debug('Parsed Transfer events from donation handler', {
           txHash,
@@ -932,6 +946,7 @@ export class EvmTransactionService implements IChainHandler {
           transfers,
           toAddress,
           amount,
+          erc20TokenDecimals,
         );
       }
 
@@ -976,10 +991,13 @@ export class EvmTransactionService implements IChainHandler {
     const block = await provider.getBlock(receipt.blockNumber);
     const timestamp = block?.timestamp || Math.floor(Date.now() / 1000);
 
-    // Convert amount from BigInt to number (assuming 18 decimals for most tokens)
-    const tokenDecimals = 18; // TODO: Could fetch from token contract if needed
-    const transferAmount =
-      Number(donationTransfer.amount) / 10 ** tokenDecimals;
+    // Use actual token/native decimals for normalized amount
+    const decimals = donationTransfer.isNativeToken
+      ? getNetworkConfig(networkId).nativeCurrency.decimals
+      : await this.getTokenDecimals(networkId, donationTransfer.tokenAddress);
+    const transferAmount = Number(
+      ethers.utils.formatUnits(donationTransfer.amount.toString(), decimals),
+    );
 
     // Determine the currency symbol
     // For native tokens, use the network's native currency (ETH, MATIC, etc.)
@@ -1070,7 +1088,7 @@ export class EvmTransactionService implements IChainHandler {
   async getTransactionInfo(
     input: TransactionDetailInput,
   ): Promise<NetworkTransactionInfo> {
-    const { txHash, symbol, networkId, amount } = input;
+    const { txHash, symbol, networkId } = input;
 
     logger.debug('Getting EVM transaction info', {
       txHash,
@@ -1152,19 +1170,84 @@ export class EvmTransactionService implements IChainHandler {
         : null;
       const timestamp = block?.timestamp || Math.floor(Date.now() / 1000);
 
+      const expectsNativeToken = this.isNativeCurrencySymbol(networkId, symbol);
       let txAmount: number;
-      if (symbol.toUpperCase() === 'ETH' || symbol.toUpperCase() === 'MATIC') {
-        txAmount = parseFloat(ethers.utils.formatEther(tx.value));
+      let fromAddress = tx.from;
+      let toAddress = tx.to || '';
+
+      if (expectsNativeToken) {
+        const nativeDecimals =
+          getNetworkConfig(networkId).nativeCurrency.decimals;
+        txAmount = Number(
+          ethers.utils.formatUnits(tx.value.toString(), nativeDecimals),
+        );
       } else {
-        txAmount = amount;
+        // Direct ERC-20: amount must be read from Transfer logs, not from input
+        if (!receipt || !receipt.logs.length) {
+          throw new BlockchainError(
+            BlockchainErrorCode.TRANSACTION_NOT_FOUND,
+            receipt
+              ? `No transfer logs found for direct ERC-20 verification: ${txHash}`
+              : `Transaction receipt not available (pending?): ${txHash}. Cannot verify ERC-20 amount without receipt.`,
+            { txHash, networkId },
+          );
+        }
+        let transfers = this.parseTransferEvents(receipt.logs);
+        const expectedTo = normalizeAddress(input.toAddress);
+        transfers = transfers.filter(
+          (t) => normalizeAddress(t.to) === expectedTo,
+        );
+        if (input.tokenAddress) {
+          const expectedToken = normalizeAddress(input.tokenAddress);
+          transfers = transfers.filter(
+            (t) => normalizeAddress(t.tokenAddress) === expectedToken,
+          );
+        }
+        if (input.fromAddress) {
+          const expectedFrom = normalizeAddress(input.fromAddress);
+          transfers = transfers.filter(
+            (t) => normalizeAddress(t.from) === expectedFrom,
+          );
+        }
+        if (transfers.length === 0) {
+          throw new BlockchainError(
+            BlockchainErrorCode.TO_ADDRESS_MISMATCH,
+            `No ERC-20 transfer found to ${input.toAddress} in transaction ${txHash}`,
+            { txHash, networkId, expectedTo: input.toAddress },
+          );
+        }
+        const tokenAddressForDecimals =
+          input.tokenAddress || transfers[0].tokenAddress;
+        const decimals = await this.getTokenDecimals(
+          networkId,
+          tokenAddressForDecimals,
+        );
+        const selected = this.findDonationTransfer(
+          transfers,
+          input.toAddress,
+          input.amount,
+          decimals,
+        );
+        if (!selected) {
+          throw new BlockchainError(
+            BlockchainErrorCode.TO_ADDRESS_MISMATCH,
+            `No matching ERC-20 transfer found in transaction ${txHash}`,
+            { txHash, networkId, expectedTo: input.toAddress },
+          );
+        }
+        txAmount = Number(
+          ethers.utils.formatUnits(selected.amount.toString(), decimals),
+        );
+        fromAddress = selected.from;
+        toAddress = selected.to;
       }
 
       const transactionInfo: NetworkTransactionInfo = {
         hash: tx.hash,
         amount: txAmount,
         nonce: tx.nonce,
-        from: tx.from,
-        to: tx.to || '',
+        from: fromAddress,
+        to: toAddress,
         currency: symbol,
         timestamp,
         status: receipt
