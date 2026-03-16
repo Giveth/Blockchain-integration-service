@@ -87,5 +87,3 @@ Interacts with ERC-20 contracts for `symbol()` validation, `decimals()` lookups 
 ## Infrastructure
 
 Deployed via Docker Compose (repo: `giveth-v6-deploy`) alongside giveth-v6-core, Redis, and Caddy reverse proxy. This service is **stateless** — no database and no persistent business data. It does hold in-memory caches and connection pools (CoinGecko price cache, EVM provider instances, Solana connections, chain handler registry) that are rebuilt on restart.
-
-Health check: `GET /api/health`
