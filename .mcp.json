@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp/oauth"
+    },
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${GIVETH_GITHUB_MCP_PAT:-}",
+        "X-MCP-Toolsets": "default,projects,notifications"
+      }
+    }
+  }
+}
