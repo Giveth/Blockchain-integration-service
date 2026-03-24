@@ -1,4 +1,5 @@
 import {
+  Erc721OwnershipCheckInput,
   TransactionDetailInput,
   NetworkTransactionInfo,
   TransactionValidationResult,
@@ -243,6 +244,32 @@ export class TransactionVerificationService {
         error,
         txHash,
         networkId,
+      });
+      throw error;
+    }
+  }
+
+  async checkErc721Ownership(
+    input: Erc721OwnershipCheckInput,
+  ): Promise<boolean> {
+    logger.debug('Checking ERC-721 ownership', {
+      networkId: input.networkId,
+      walletAddress: input.walletAddress,
+      contractAddress: input.contractAddress,
+    });
+
+    try {
+      return await evmTransactionService.checkErc721Ownership(
+        input.networkId,
+        input.walletAddress,
+        input.contractAddress,
+      );
+    } catch (error) {
+      logger.error('Error checking ERC-721 ownership', {
+        error,
+        networkId: input.networkId,
+        walletAddress: input.walletAddress,
+        contractAddress: input.contractAddress,
       });
       throw error;
     }

@@ -137,3 +137,12 @@ export interface TokenPriceInput {
   symbol: string;
   tokenAddress?: string | null;
 }
+
+/**
+ * ERC-721 ownership request input
+ */
+export interface Erc721OwnershipCheckInput {
+  networkId: number;
+  walletAddress: string;
+  contractAddress: string;
+}
