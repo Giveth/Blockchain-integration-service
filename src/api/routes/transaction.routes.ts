@@ -4,6 +4,7 @@ import { transactionVerificationService } from '../../services/transactionVerifi
 import { priceService } from '../../services/priceService';
 import { validateRequest } from '../middleware/validation';
 import {
+  Erc721OwnershipCheckInput,
   TransactionDetailInput,
   TransactionVerificationResult,
   TransactionValidationResult,
@@ -45,6 +46,16 @@ const getPriceSchema = Joi.object({
   networkId: Joi.number().required(),
   symbol: Joi.string().required(),
   tokenAddress: Joi.string().allow(null).optional(),
+});
+
+const erc721OwnershipSchema = Joi.object({
+  networkId: Joi.number().required(),
+  walletAddress: Joi.string()
+    .pattern(/^0x[a-fA-F0-9]{40}$/)
+    .required(),
+  contractAddress: Joi.string()
+    .pattern(/^0x[a-fA-F0-9]{40}$/)
+    .required(),
 });
 
 /**
@@ -172,6 +183,27 @@ router.post(
           symbol,
           tokenAddress: tokenAddress || null,
           priceUsd,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+router.post(
+  '/nft/erc721/ownership',
+  validateRequest(erc721OwnershipSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const input: Erc721OwnershipCheckInput = req.body;
+      const ownsNft =
+        await transactionVerificationService.checkErc721Ownership(input);
+
+      res.json({
+        success: true,
+        data: {
+          ownsNft,
         },
       });
     } catch (error) {

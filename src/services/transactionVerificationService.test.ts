@@ -1,6 +1,8 @@
 import { expect } from 'chai';
+import sinon from 'sinon';
 import { TransactionVerificationService } from './transactionVerificationService';
 import { TransactionDetailInput } from '../types';
+import * as evmTransactionServiceModule from './chains/evm/evmTransactionService';
 
 describe('TransactionVerificationService', () => {
   let service: TransactionVerificationService;
@@ -118,6 +120,54 @@ describe('TransactionVerificationService', () => {
       } catch (error) {
         // Expected without RPC connection
         expect(error).to.exist;
+      }
+    });
+  });
+
+  describe('checkErc721Ownership', () => {
+    afterEach(() => {
+      sinon.restore();
+    });
+
+    it('should delegate ERC-721 ownership checks to the EVM service', async () => {
+      const checkOwnershipStub = sinon.stub(
+        evmTransactionServiceModule.evmTransactionService,
+        'checkErc721Ownership',
+      );
+      checkOwnershipStub.resolves(true);
+
+      const result = await service.checkErc721Ownership({
+        networkId: 1,
+        walletAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+        contractAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+      });
+
+      expect(result).to.equal(true);
+      expect(
+        checkOwnershipStub.calledOnceWithExactly(
+          1,
+          '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+          '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+        ),
+      ).to.be.true;
+    });
+
+    it('should rethrow errors from the EVM service', async () => {
+      const checkOwnershipStub = sinon.stub(
+        evmTransactionServiceModule.evmTransactionService,
+        'checkErc721Ownership',
+      );
+      checkOwnershipStub.rejects(new Error('RPC unavailable'));
+
+      try {
+        await service.checkErc721Ownership({
+          networkId: 1,
+          walletAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+          contractAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+        });
+        expect.fail('Expected ERC-721 ownership check to throw');
+      } catch (error) {
+        expect((error as Error).message).to.equal('RPC unavailable');
       }
     });
   });

@@ -16,6 +16,7 @@ import {
 import {
   closeTo,
   isValidEvmTransactionHash,
+  isValidEthereumAddress,
   normalizeAddress,
 } from '../../../utils/validation';
 import { IChainHandler } from '../IChainHandler';
@@ -44,6 +45,9 @@ const ERC20_ABI = [
   'function symbol() view returns (string)',
   'function decimals() view returns (uint8)',
 ];
+
+// Minimal ERC-721 ABI for ownership checks
+const ERC721_ABI = ['function balanceOf(address owner) view returns (uint256)'];
 
 interface InternalValueTransfer {
   from: string;
@@ -131,6 +135,66 @@ export class EvmTransactionService implements IChainHandler {
         error: error instanceof Error ? error.message : 'Unknown error',
       });
       return 18;
+    }
+  }
+
+  async checkErc721Ownership(
+    networkId: number,
+    walletAddress: string,
+    contractAddress: string,
+  ): Promise<boolean> {
+    if (!this.isSupported(networkId)) {
+      throw new BlockchainError(
+        BlockchainErrorCode.UNSUPPORTED_CHAIN,
+        `ERC-721 ownership checks are only supported on EVM networks (received ${networkId})`,
+        { networkId },
+      );
+    }
+
+    if (!isValidEthereumAddress(walletAddress)) {
+      throw new BlockchainError(
+        BlockchainErrorCode.PROVIDER_ERROR,
+        'Invalid wallet address for ERC-721 ownership check',
+        { walletAddress, networkId },
+      );
+    }
+
+    if (!isValidEthereumAddress(contractAddress)) {
+      throw new BlockchainError(
+        BlockchainErrorCode.PROVIDER_ERROR,
+        'Invalid contract address for ERC-721 ownership check',
+        { contractAddress, networkId },
+      );
+    }
+
+    try {
+      const provider = this.getProvider(networkId);
+      const contract = new ethers.Contract(
+        contractAddress,
+        ERC721_ABI,
+        provider,
+      );
+      const balance: ethers.BigNumber = await contract.balanceOf(walletAddress);
+
+      return balance.gt(0);
+    } catch (error) {
+      logger.error('Failed to check ERC-721 ownership', {
+        networkId,
+        walletAddress,
+        contractAddress,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+
+      throw new BlockchainError(
+        BlockchainErrorCode.NETWORK_ERROR,
+        'Failed to check ERC-721 ownership',
+        {
+          networkId,
+          walletAddress,
+          contractAddress,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        },
+      );
     }
   }
 
