@@ -12,6 +12,7 @@ describe('Transaction Routes', () => {
   let verifyTransactionsStub: sinon.SinonStub;
   let getTransactionTimestampStub: sinon.SinonStub;
   let getTokenPriceStub: sinon.SinonStub;
+  let checkErc721OwnershipStub: sinon.SinonStub;
 
   beforeEach(() => {
     // Mock transaction verification service
@@ -26,6 +27,10 @@ describe('Transaction Routes', () => {
     getTransactionTimestampStub = sinon.stub(
       transactionVerificationServiceModule.transactionVerificationService,
       'getTransactionTimestamp',
+    );
+    checkErc721OwnershipStub = sinon.stub(
+      transactionVerificationServiceModule.transactionVerificationService,
+      'checkErc721Ownership',
     );
 
     // Mock price service
@@ -197,6 +202,39 @@ describe('Transaction Routes', () => {
       expect(serviceInput.isSwap).to.equal(true);
       expect(serviceInput.nonce).to.equal(42);
       expect(serviceInput.safeTxHash).to.equal('0xsafe123');
+    });
+
+    it('should allow safeTxHash without txHash', async () => {
+      const mockResult = {
+        isValid: true,
+        transaction: {
+          hash: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+          from: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+          to: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+          amount: 1.5,
+          timestamp: Math.floor(Date.now() / 1000),
+          currency: 'ETH',
+          status: TransactionStatus.SUCCESS,
+        },
+      };
+      verifyTransactionStub.resolves(mockResult);
+
+      await request(app)
+        .post('/api/verify')
+        .send({
+          networkId: 1,
+          symbol: 'ETH',
+          fromAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+          toAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+          amount: 1.5,
+          timestamp: Math.floor(Date.now() / 1000),
+          safeTxHash: '0xsafe123',
+        })
+        .expect(200);
+
+      const serviceInput = verifyTransactionStub.firstCall.args[0];
+      expect(serviceInput.safeTxHash).to.equal('0xsafe123');
+      expect(serviceInput.txHash).to.be.undefined;
     });
 
     it('should handle service errors gracefully', async () => {
@@ -489,6 +527,72 @@ describe('Transaction Routes', () => {
 
       expect(response.body.success).to.be.true;
       expect(response.body.data.priceUsd).to.equal(0);
+    });
+  });
+
+  describe('POST /api/nft/erc721/ownership', () => {
+    it('should return 400 for missing required fields', async () => {
+      const response = await request(app)
+        .post('/api/nft/erc721/ownership')
+        .send({})
+        .expect(400);
+
+      expect(response.body.success).to.be.false;
+      expect(response.body.error).to.equal('Validation failed');
+      expect(checkErc721OwnershipStub.called).to.be.false;
+    });
+
+    it('should call service with correct parameters and return ownership result', async () => {
+      checkErc721OwnershipStub.resolves(true);
+
+      const response = await request(app)
+        .post('/api/nft/erc721/ownership')
+        .send({
+          networkId: 1,
+          walletAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+          contractAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+        })
+        .expect(200);
+
+      expect(checkErc721OwnershipStub.calledOnce).to.be.true;
+      expect(checkErc721OwnershipStub.firstCall.args[0]).to.deep.equal({
+        networkId: 1,
+        walletAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+        contractAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+      });
+      expect(response.body.success).to.be.true;
+      expect(response.body.data.ownsNft).to.equal(true);
+    });
+
+    it('should reject invalid wallet addresses', async () => {
+      const response = await request(app)
+        .post('/api/nft/erc721/ownership')
+        .send({
+          networkId: 1,
+          walletAddress: 'invalid-wallet',
+          contractAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+        })
+        .expect(400);
+
+      expect(response.body.success).to.be.false;
+      expect(checkErc721OwnershipStub.called).to.be.false;
+    });
+
+    it('should handle service errors gracefully', async () => {
+      checkErc721OwnershipStub.rejects(
+        new Error('ERC-721 ownership check failed'),
+      );
+
+      const response = await request(app)
+        .post('/api/nft/erc721/ownership')
+        .send({
+          networkId: 1,
+          walletAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+          contractAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+        });
+
+      expect(response.status).to.be.oneOf([400, 500]);
+      expect(response.body.success).to.be.false;
     });
   });
 

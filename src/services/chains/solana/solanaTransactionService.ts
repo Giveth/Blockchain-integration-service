@@ -93,7 +93,7 @@ export class SolanaTransactionService implements IChainHandler {
       symbol,
     });
 
-    if (!isValidSolanaSignature(txHash)) {
+    if (!txHash || !isValidSolanaSignature(txHash)) {
       throw new BlockchainError(
         BlockchainErrorCode.INVALID_TRANSACTION_HASH,
         `Invalid Solana signature format: ${txHash}`,

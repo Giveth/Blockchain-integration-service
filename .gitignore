@@ -37,5 +37,11 @@ coverage/
 temp/
 tmp/
 
+# Codex
+/.codex/*
+!/.codex/config.toml
+!/.codex/skills
+/.codex/skills/.system
+
 
 

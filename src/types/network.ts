@@ -71,7 +71,7 @@ export interface NetworkTransactionInfo {
 }
 
 export interface TransactionDetailInput {
-  txHash: string;
+  txHash?: string;
   symbol: string;
   networkId: number;
   fromAddress: string;
@@ -97,7 +97,7 @@ export interface TransactionValidationResult {
  * Transaction verification input from external services
  */
 export interface TransactionVerificationInput {
-  txHash: string;
+  txHash?: string;
   networkId: number;
   symbol: string;
   fromAddress: string;
@@ -136,4 +136,13 @@ export interface TokenPriceInput {
   networkId: number;
   symbol: string;
   tokenAddress?: string | null;
+}
+
+/**
+ * ERC-721 ownership request input
+ */
+export interface Erc721OwnershipCheckInput {
+  networkId: number;
+  walletAddress: string;
+  contractAddress: string;
 }

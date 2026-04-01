@@ -1,4 +1,5 @@
 import {
+  Erc721OwnershipCheckInput,
   TransactionDetailInput,
   NetworkTransactionInfo,
   TransactionValidationResult,
@@ -36,7 +37,7 @@ export class TransactionVerificationService {
       const isValidSwap =
         await evmTransactionService.isSwapTransactionToAddress(
           input.networkId,
-          input.txHash,
+          transaction.hash,
           input.toAddress,
         );
 
@@ -158,6 +159,17 @@ export class TransactionVerificationService {
         input.txHash = safeHash;
       }
 
+      if (!input.txHash) {
+        throw new BlockchainError(
+          BlockchainErrorCode.INVALID_TRANSACTION_HASH,
+          'Transaction hash is required or could not be resolved from safeTxHash',
+          {
+            safeTxHash: input.safeTxHash,
+            networkId: input.networkId,
+          },
+        );
+      }
+
       const transaction = await getTransactionInfoFromNetwork(input);
       await this.validateTransaction(transaction, input);
 
@@ -243,6 +255,32 @@ export class TransactionVerificationService {
         error,
         txHash,
         networkId,
+      });
+      throw error;
+    }
+  }
+
+  async checkErc721Ownership(
+    input: Erc721OwnershipCheckInput,
+  ): Promise<boolean> {
+    logger.debug('Checking ERC-721 ownership', {
+      networkId: input.networkId,
+      walletAddress: input.walletAddress,
+      contractAddress: input.contractAddress,
+    });
+
+    try {
+      return await evmTransactionService.checkErc721Ownership(
+        input.networkId,
+        input.walletAddress,
+        input.contractAddress,
+      );
+    } catch (error) {
+      logger.error('Error checking ERC-721 ownership', {
+        error,
+        networkId: input.networkId,
+        walletAddress: input.walletAddress,
+        contractAddress: input.contractAddress,
       });
       throw error;
     }
