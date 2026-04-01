@@ -13,9 +13,9 @@ import {
 const router = Router();
 
 const verifyTransactionSchema = Joi.object({
-  txHash: Joi.string().allow('').when('safeTxHash', {
+  txHash: Joi.string().when('safeTxHash', {
     is: Joi.exist(),
-    then: Joi.optional(),
+    then: Joi.optional().allow(''),
     otherwise: Joi.required(),
   }),
   symbol: Joi.string().required(),

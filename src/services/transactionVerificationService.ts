@@ -161,7 +161,7 @@ export class TransactionVerificationService {
       if (!input.txHash) {
         throw new BlockchainError(
           BlockchainErrorCode.INVALID_TRANSACTION_HASH,
-          'Transaction hash is required when safeTxHash is not provided',
+          'Transaction hash is required or could not be resolved from safeTxHash',
           {
             safeTxHash: input.safeTxHash,
             networkId: input.networkId,
