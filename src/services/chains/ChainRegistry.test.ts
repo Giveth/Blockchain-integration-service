@@ -7,7 +7,7 @@ describe('ChainRegistry', () => {
   const mockHandler: IChainHandler = {
     async getTransactionInfo(input: TransactionDetailInput) {
       return {
-        hash: input.txHash,
+        hash: input.txHash || '',
         amount: input.amount,
         from: input.fromAddress,
         to: input.toAddress,

@@ -37,7 +37,7 @@ export class TransactionVerificationService {
       const isValidSwap =
         await evmTransactionService.isSwapTransactionToAddress(
           input.networkId,
-          input.txHash,
+          transaction.hash,
           input.toAddress,
         );
 
@@ -157,6 +157,17 @@ export class TransactionVerificationService {
         }
 
         input.txHash = safeHash;
+      }
+
+      if (!input.txHash) {
+        throw new BlockchainError(
+          BlockchainErrorCode.INVALID_TRANSACTION_HASH,
+          'Transaction hash is required or could not be resolved from safeTxHash',
+          {
+            safeTxHash: input.safeTxHash,
+            networkId: input.networkId,
+          },
+        );
       }
 
       const transaction = await getTransactionInfoFromNetwork(input);

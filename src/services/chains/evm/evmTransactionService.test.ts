@@ -9,8 +9,14 @@ import {
 // Transfer event topic
 const TRANSFER_TOPIC =
   '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+const DONATION_MADE_TOPIC =
+  '0x428e1190dfef997f3ac8da6afa80e330fc785bafb1febed9109598bfeee45ec0';
 
 describe('EvmTransactionService', () => {
+  const providers = (
+    evmTransactionService as unknown as { providers: Map<number, unknown> }
+  ).providers;
+
   describe('findDonationTransfer', () => {
     const sampleTransfers: DonationTransferInfo[] = [
       {
@@ -322,7 +328,7 @@ describe('EvmTransactionService', () => {
         .stub(evmTransactionService, 'getTokenDecimals')
         .resolves(6);
 
-      (evmTransactionService as any).providers.set(1, fakeProvider);
+      providers.set(1, fakeProvider);
 
       try {
         const result = await evmTransactionService.getTransactionInfo({
@@ -340,7 +346,81 @@ describe('EvmTransactionService', () => {
         expect(result.amount).to.not.equal(999);
       } finally {
         getTokenDecimalsStub.restore();
-        (evmTransactionService as any).providers.delete(1);
+        providers.delete(1);
+      }
+    });
+  });
+
+  describe('getTransactionInfo (Safe donation handler)', () => {
+    const SAFE_ADDRESS = '0x1111111111111111111111111111111111111111';
+    const EXECUTOR_ADDRESS = '0x2222222222222222222222222222222222222222';
+    const RECIPIENT = '0x3333333333333333333333333333333333333333';
+    const DONATION_HANDLER = '0x97b2cb568e0880B99Cd16EFc6edFF5272Aa02676';
+    const TX_HASH =
+      '0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+
+    it('should attribute donation handler transfers to the Safe account', async () => {
+      const amountRaw = ethers.utils.parseUnits('1.5', 18);
+      const donationLog: ethers.providers.Log = {
+        address: DONATION_HANDLER,
+        blockHash:
+          '0xabcd000000000000000000000000000000000000000000000000000000000000',
+        blockNumber: 12345,
+        data: '0x' + amountRaw.toHexString().slice(2).padStart(64, '0'),
+        logIndex: 0,
+        removed: false,
+        topics: [
+          DONATION_MADE_TOPIC,
+          '0x000000000000000000000000' + RECIPIENT.slice(2).toLowerCase(),
+          '0x000000000000000000000000' + '0'.repeat(40),
+        ],
+        transactionHash: TX_HASH,
+        transactionIndex: 0,
+      };
+
+      const txResponse = {
+        hash: TX_HASH,
+        from: EXECUTOR_ADDRESS,
+        to: SAFE_ADDRESS,
+        value: ethers.BigNumber.from(0),
+        nonce: 7,
+        blockNumber: 12345,
+        gasPrice: ethers.BigNumber.from(1),
+      };
+      const receipt = {
+        status: 1,
+        blockNumber: 12345,
+        gasUsed: ethers.BigNumber.from(21000),
+        logs: [donationLog],
+      };
+      const block = { timestamp: 1600000000 };
+
+      const fakeProvider = {
+        getTransaction: sinon.stub().resolves(txResponse),
+        getTransactionReceipt: sinon.stub().resolves(receipt),
+        getBlock: sinon.stub().resolves(block),
+      };
+
+      providers.set(100, fakeProvider);
+
+      try {
+        const result = await evmTransactionService.getTransactionInfo({
+          txHash: TX_HASH,
+          safeTxHash:
+            '0x9999999999999999999999999999999999999999999999999999999999999999',
+          networkId: 100,
+          symbol: 'XDAI',
+          fromAddress: SAFE_ADDRESS,
+          toAddress: RECIPIENT,
+          amount: 1.5,
+          timestamp: 1600000000,
+        });
+
+        expect(result.from).to.equal(SAFE_ADDRESS);
+        expect(result.to).to.equal(RECIPIENT);
+        expect(result.amount).to.equal(1.5);
+      } finally {
+        providers.delete(100);
       }
     });
   });

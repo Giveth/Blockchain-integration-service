@@ -14,7 +14,11 @@ import {
 const router = Router();
 
 const verifyTransactionSchema = Joi.object({
-  txHash: Joi.string().required(),
+  txHash: Joi.string().when('safeTxHash', {
+    is: Joi.exist(),
+    then: Joi.optional().allow(''),
+    otherwise: Joi.required(),
+  }),
   symbol: Joi.string().required(),
   networkId: Joi.number().required(),
   fromAddress: Joi.string().required(),

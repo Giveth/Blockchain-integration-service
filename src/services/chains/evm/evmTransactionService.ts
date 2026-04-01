@@ -486,7 +486,7 @@ export class EvmTransactionService implements IChainHandler {
     tx: ethers.providers.TransactionResponse,
     receipt: ethers.providers.TransactionReceipt,
   ): Promise<NetworkTransactionInfo | null> {
-    const { txHash, networkId, symbol } = input;
+    const { networkId, symbol } = input;
     const provider = this.getProvider(networkId);
     const block = await provider.getBlock(receipt.blockNumber);
     const timestamp = block?.timestamp || Math.floor(Date.now() / 1000);
@@ -509,7 +509,7 @@ export class EvmTransactionService implements IChainHandler {
 
       const internalTransfers = await this.getInternalValueTransfers(
         networkId,
-        txHash,
+        tx.hash,
       );
 
       if (donationTransfer) {
@@ -689,6 +689,34 @@ export class EvmTransactionService implements IChainHandler {
     return transfers;
   }
 
+  private hasDonationHandlerLog(
+    networkId: number,
+    logs: ethers.providers.Log[],
+  ): boolean {
+    return logs.some((log) => isDonationHandlerAddress(networkId, log.address));
+  }
+
+  private getDonationSenderAddress(
+    input: TransactionDetailInput,
+    tx: ethers.providers.TransactionResponse,
+    receipt: ethers.providers.TransactionReceipt,
+  ): string {
+    const txTo = tx.to ? normalizeAddress(tx.to) : null;
+
+    // Safe executions submit the outer transaction to the Safe contract,
+    // while the donation handler call happens internally and emits logs.
+    if (
+      input.safeTxHash &&
+      txTo &&
+      !isDonationHandlerAddress(input.networkId, txTo) &&
+      this.hasDonationHandlerLog(input.networkId, receipt.logs)
+    ) {
+      return tx.to!;
+    }
+
+    return tx.from;
+  }
+
   /**
    * Parse DonationMade events from transaction logs
    * Used for both ERC-20 and native token donations through donation handler
@@ -696,7 +724,7 @@ export class EvmTransactionService implements IChainHandler {
    */
   private parseDonationMadeEvents(
     logs: ethers.providers.Log[],
-    txFrom: string,
+    senderAddress: string,
   ): DonationTransferInfo[] {
     const donations: DonationTransferInfo[] = [];
 
@@ -723,7 +751,7 @@ export class EvmTransactionService implements IChainHandler {
             tokenAddress.toLowerCase() === NATIVE_TOKEN_ADDRESS.toLowerCase();
 
           donations.push({
-            from: txFrom, // The original transaction sender
+            from: senderAddress,
             to,
             amount,
             tokenAddress: isNativeToken ? NATIVE_TOKEN_ADDRESS : tokenAddress,
@@ -827,6 +855,14 @@ export class EvmTransactionService implements IChainHandler {
   ): Promise<NetworkTransactionInfo> {
     const { txHash, networkId, toAddress, amount, symbol, tokenAddress } =
       input;
+
+    if (!txHash) {
+      throw new BlockchainError(
+        BlockchainErrorCode.INVALID_TRANSACTION_HASH,
+        'Transaction hash is required for donation handler verification',
+        { networkId },
+      );
+    }
 
     logger.debug('Getting donation handler transaction info', {
       txHash,
@@ -934,7 +970,15 @@ export class EvmTransactionService implements IChainHandler {
     let donationTransfer: DonationTransferInfo | null = null;
 
     // Parse all DonationMade events
-    const allDonations = this.parseDonationMadeEvents(receipt.logs, tx.from);
+    const donationSenderAddress = this.getDonationSenderAddress(
+      input,
+      tx,
+      receipt,
+    );
+    const allDonations = this.parseDonationMadeEvents(
+      receipt.logs,
+      donationSenderAddress,
+    );
 
     logger.debug('Parsed DonationMade events from donation handler', {
       txHash,
@@ -1160,7 +1204,7 @@ export class EvmTransactionService implements IChainHandler {
       symbol,
     });
 
-    if (!isValidEvmTransactionHash(txHash)) {
+    if (!txHash || !isValidEvmTransactionHash(txHash)) {
       throw new BlockchainError(
         BlockchainErrorCode.INVALID_TRANSACTION_HASH,
         `Invalid EVM transaction hash format: ${txHash}`,
@@ -1191,8 +1235,12 @@ export class EvmTransactionService implements IChainHandler {
         );
       }
 
-      // Check if this transaction is to a donation handler contract
-      if (tx.to && isDonationHandlerAddress(networkId, tx.to)) {
+      // Safe executions call the Safe contract as the outer tx target,
+      // so detect donation handler activity from receipt logs as well.
+      if (
+        (tx.to && isDonationHandlerAddress(networkId, tx.to)) ||
+        (receipt && this.hasDonationHandlerLog(networkId, receipt.logs))
+      ) {
         logger.debug('Transaction is to a donation handler contract', {
           txHash,
           donationHandler: tx.to,

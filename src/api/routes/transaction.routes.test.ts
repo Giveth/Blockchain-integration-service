@@ -204,6 +204,39 @@ describe('Transaction Routes', () => {
       expect(serviceInput.safeTxHash).to.equal('0xsafe123');
     });
 
+    it('should allow safeTxHash without txHash', async () => {
+      const mockResult = {
+        isValid: true,
+        transaction: {
+          hash: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+          from: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+          to: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+          amount: 1.5,
+          timestamp: Math.floor(Date.now() / 1000),
+          currency: 'ETH',
+          status: TransactionStatus.SUCCESS,
+        },
+      };
+      verifyTransactionStub.resolves(mockResult);
+
+      await request(app)
+        .post('/api/verify')
+        .send({
+          networkId: 1,
+          symbol: 'ETH',
+          fromAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+          toAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+          amount: 1.5,
+          timestamp: Math.floor(Date.now() / 1000),
+          safeTxHash: '0xsafe123',
+        })
+        .expect(200);
+
+      const serviceInput = verifyTransactionStub.firstCall.args[0];
+      expect(serviceInput.safeTxHash).to.equal('0xsafe123');
+      expect(serviceInput.txHash).to.be.undefined;
+    });
+
     it('should handle service errors gracefully', async () => {
       verifyTransactionStub.rejects(new Error('Service unavailable'));
 
