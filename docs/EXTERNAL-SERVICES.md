@@ -35,7 +35,7 @@
 
 ---
 
-## Consumer
+## Consumers
 
 ### giveth-v6-core
 
@@ -44,6 +44,15 @@ The only direct consumer. v6-core proxies all blockchain interaction through thi
 - **Their client code:** `giveth-v6-core/src/integrations/blockchain/blockchain.service.ts`
 - **Endpoints actively consumed:** `POST /api/verify`, `POST /api/timestamp`, `POST /api/price`, `GET /api/chains`, `GET /api/chains/:networkId/transaction-url/:txHash`
 - **Endpoint wired but not yet called:** `POST /api/verify-batch` (client method exists in v6-core but no call site uses it)
+
+### GIVeconomy-service
+
+GIVeconomy-service now uses this service as its live GIV price source for the GIVbacks monthly-panel calculation.
+
+- **Their service code:** `GIVeconomy-service/src/services/tokenPriceService.ts`
+- **Endpoint actively consumed:** `POST /api/price`
+- **Current request shape:** `networkId: 1`, `symbol: 'GIV'`
+- **Why:** centralize token-price lookup logic here instead of duplicating CoinGecko / CryptoCompare access in GIVeconomy.
 
 ---
 
@@ -66,6 +75,7 @@ Direct connection via `@solana/web3.js` for parsing Solana transactions and calc
 Token price lookups in USD by symbol or contract address. Results cached in-memory (1-min TTL).
 
 - **Source:** `src/services/priceService.ts`
+- **Extra detail:** the symbol lookup path now includes selected well-known non-native tokens such as `GIV`, so downstream services can request GIV/USD with the same `/api/price` contract they already use for native tokens.
 
 ### Safe API (Gnosis Safe)
 
