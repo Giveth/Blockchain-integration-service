@@ -16,8 +16,8 @@ const COINGECKO_PLATFORM_IDS: Record<number, string> = {
   101: 'solana',
 };
 
-// Native token CoinGecko IDs
-const NATIVE_TOKEN_IDS: Record<string, string> = {
+// Symbol-based CoinGecko IDs for native tokens and selected known ERC-20s.
+const SYMBOL_TOKEN_IDS: Record<string, string> = {
   ETH: 'ethereum',
   MATIC: 'polygon-ecosystem-token', // MATIC was rebranded to POL
   POL: 'polygon-ecosystem-token',
@@ -27,6 +27,7 @@ const NATIVE_TOKEN_IDS: Record<string, string> = {
   XDAI: 'xdai', // Native token on Gnosis Chain
   DAI: 'dai',
   SOL: 'solana',
+  GIV: 'giveth',
 };
 
 export class PriceService {
@@ -110,10 +111,10 @@ export class PriceService {
   }
 
   private async getPriceBySymbol(symbol: string): Promise<number> {
-    const coinId = NATIVE_TOKEN_IDS[symbol.toUpperCase()];
+    const coinId = SYMBOL_TOKEN_IDS[symbol.toUpperCase()];
 
     if (!coinId) {
-      logger.warn('Unknown native token symbol', { symbol });
+      logger.warn('Unknown symbol for direct price lookup', { symbol });
       return 0;
     }
 
