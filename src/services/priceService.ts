@@ -32,7 +32,7 @@ const SYMBOL_TOKEN_IDS: Record<string, string> = {
 
 // TODO: Replace with the real FINN mainnet address once deployed.
 export const FINN_MOCK_ADDRESS_MAINNET =
-  '0x000000000000000000000000000000000000f199'.toLowerCase();
+  '0xb87c3637Eb7C28AaC2C918ED8EC0C3b3b5e8fB67'.toLowerCase();
 
 type FixedPriceEntry = { kind: 'ratio'; baseSymbol: string; ratio: number };
 
