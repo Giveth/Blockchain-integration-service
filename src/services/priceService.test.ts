@@ -1,16 +1,28 @@
 import { expect } from 'chai';
 import sinon from 'sinon';
 import axios from 'axios';
-import { priceService } from './priceService';
+import { FINN_MOCK_ADDRESS_MAINNET, PriceService } from './priceService';
 
-describe('PriceService', () => {
+describe('PriceService - FINN fixed-price override', () => {
+  let axiosGetStub: sinon.SinonStub;
+  let priceService: PriceService;
+
+  const ETH_COINGECKO_URL =
+    'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd';
+
+  beforeEach(() => {
+    axiosGetStub = sinon.stub(axios, 'get');
+    // Fresh instance per test to avoid cross-test cache pollution.
+    priceService = new PriceService();
+  });
+
   afterEach(() => {
     sinon.restore();
   });
 
   describe('getTokenPrice', () => {
     it('uses the GIV symbol mapping for direct price lookup', async () => {
-      const axiosGetStub = sinon.stub(axios, 'get').resolves({
+      axiosGetStub.resolves({
         data: {
           giveth: {
             usd: 0.055,
@@ -33,7 +45,7 @@ describe('PriceService', () => {
 
     it('uses contract address lookup when tokenAddress is provided', async () => {
       const tokenAddress = '0x1234567890abcdef1234567890abcdef12345678';
-      const axiosGetStub = sinon.stub(axios, 'get').resolves({
+      axiosGetStub.resolves({
         data: {
           [tokenAddress.toLowerCase()]: {
             usd: 1.23,
@@ -54,5 +66,96 @@ describe('PriceService', () => {
         { timeout: 10000 },
       );
     });
+  });
+
+  it('returns 0.001 * ETH USD price for FINN at the mock mainnet address', async () => {
+    axiosGetStub.withArgs(ETH_COINGECKO_URL, sinon.match.any).resolves({
+      data: { ethereum: { usd: 2500 } },
+    });
+
+    const price = await priceService.getTokenPrice({
+      networkId: 1,
+      symbol: 'FINN',
+      tokenAddress: FINN_MOCK_ADDRESS_MAINNET,
+    });
+
+    expect(price).to.equal(2.5);
+    expect(axiosGetStub.calledOnce).to.be.true;
+    expect(axiosGetStub.firstCall.args[0]).to.equal(ETH_COINGECKO_URL);
+  });
+
+  it('matches the FINN override case-insensitively on the address', async () => {
+    axiosGetStub.withArgs(ETH_COINGECKO_URL, sinon.match.any).resolves({
+      data: { ethereum: { usd: 3000 } },
+    });
+
+    const price = await priceService.getTokenPrice({
+      networkId: 1,
+      symbol: 'FINN',
+      tokenAddress: FINN_MOCK_ADDRESS_MAINNET.toUpperCase(),
+    });
+
+    expect(price).to.equal(3);
+    expect(axiosGetStub.calledOnce).to.be.true;
+    expect(axiosGetStub.firstCall.args[0]).to.equal(ETH_COINGECKO_URL);
+  });
+
+  it('does not hit the CoinGecko token_price endpoint for FINN', async () => {
+    axiosGetStub.withArgs(ETH_COINGECKO_URL, sinon.match.any).resolves({
+      data: { ethereum: { usd: 2000 } },
+    });
+
+    await priceService.getTokenPrice({
+      networkId: 1,
+      symbol: 'FINN',
+      tokenAddress: FINN_MOCK_ADDRESS_MAINNET,
+    });
+
+    const calledUrls = axiosGetStub.getCalls().map((c) => c.args[0]);
+    expect(calledUrls).to.have.lengthOf(1);
+    expect(calledUrls[0]).to.not.include('/simple/token_price/');
+  });
+
+  it('caches the derived FINN price within the TTL', async () => {
+    axiosGetStub.withArgs(ETH_COINGECKO_URL, sinon.match.any).resolves({
+      data: { ethereum: { usd: 2500 } },
+    });
+
+    const first = await priceService.getTokenPrice({
+      networkId: 1,
+      symbol: 'FINN',
+      tokenAddress: FINN_MOCK_ADDRESS_MAINNET,
+    });
+    const second = await priceService.getTokenPrice({
+      networkId: 1,
+      symbol: 'FINN',
+      tokenAddress: FINN_MOCK_ADDRESS_MAINNET,
+    });
+
+    expect(first).to.equal(2.5);
+    expect(second).to.equal(2.5);
+    expect(axiosGetStub.calledOnce).to.be.true;
+  });
+
+  it('still routes non-FINN ERC-20 tokens through the CoinGecko token_price endpoint', async () => {
+    const usdcAddress = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
+    axiosGetStub.resolves({
+      data: { [usdcAddress.toLowerCase()]: { usd: 1 } },
+    });
+
+    const price = await priceService.getTokenPrice({
+      networkId: 1,
+      symbol: 'USDC',
+      tokenAddress: usdcAddress,
+    });
+
+    expect(price).to.equal(1);
+    expect(axiosGetStub.calledOnce).to.be.true;
+    expect(axiosGetStub.firstCall.args[0]).to.include(
+      '/simple/token_price/ethereum',
+    );
+    expect(axiosGetStub.firstCall.args[0]).to.include(
+      usdcAddress.toLowerCase(),
+    );
   });
 });
