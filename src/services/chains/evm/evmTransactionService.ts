@@ -1235,19 +1235,6 @@ export class EvmTransactionService implements IChainHandler {
         );
       }
 
-      // Safe executions call the Safe contract as the outer tx target,
-      // so detect donation handler activity from receipt logs as well.
-      if (
-        (tx.to && isDonationHandlerAddress(networkId, tx.to)) ||
-        (receipt && this.hasDonationHandlerLog(networkId, receipt.logs))
-      ) {
-        logger.debug('Transaction is to a donation handler contract', {
-          txHash,
-          donationHandler: tx.to,
-        });
-        return this.getDonationHandlerTransactionInfo(input);
-      }
-
       if (receipt && this.isErc4337EntryPointTx(tx.to)) {
         logger.info('Detected EIP-4337 EntryPoint transaction', {
           txHash,
@@ -1275,6 +1262,19 @@ export class EvmTransactionService implements IChainHandler {
             expectedAmount: input.amount,
           },
         );
+      }
+
+      // Safe executions call the Safe contract as the outer tx target,
+      // so detect donation handler activity from receipt logs as well.
+      if (
+        (tx.to && isDonationHandlerAddress(networkId, tx.to)) ||
+        (receipt && this.hasDonationHandlerLog(networkId, receipt.logs))
+      ) {
+        logger.debug('Transaction is to a donation handler contract', {
+          txHash,
+          donationHandler: tx.to,
+        });
+        return this.getDonationHandlerTransactionInfo(input);
       }
 
       const block = receipt
