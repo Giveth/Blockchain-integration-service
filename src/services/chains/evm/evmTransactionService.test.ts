@@ -423,6 +423,76 @@ describe('EvmTransactionService', () => {
         providers.delete(100);
       }
     });
+
+    it('should infer Safe sender from outer Safe transaction target', async () => {
+      const GIV_TOKEN = '0x4f4f9b8d5b4d0dc10506e5551b0513b61fd59e75';
+      const amountRaw = ethers.utils.parseUnits('0.5', 18);
+      const donationLog: ethers.providers.Log = {
+        address: DONATION_HANDLER,
+        blockHash:
+          '0xabcd000000000000000000000000000000000000000000000000000000000000',
+        blockNumber: 12345,
+        data: '0x' + amountRaw.toHexString().slice(2).padStart(64, '0'),
+        logIndex: 0,
+        removed: false,
+        topics: [
+          DONATION_MADE_TOPIC,
+          '0x000000000000000000000000' + RECIPIENT.slice(2).toLowerCase(),
+          '0x000000000000000000000000' + GIV_TOKEN.slice(2).toLowerCase(),
+        ],
+        transactionHash: TX_HASH,
+        transactionIndex: 0,
+      };
+
+      const txResponse = {
+        hash: TX_HASH,
+        from: EXECUTOR_ADDRESS,
+        to: SAFE_ADDRESS,
+        value: ethers.BigNumber.from(0),
+        nonce: 7,
+        blockNumber: 12345,
+        gasPrice: ethers.BigNumber.from(1),
+      };
+      const receipt = {
+        status: 1,
+        blockNumber: 12345,
+        gasUsed: ethers.BigNumber.from(21000),
+        logs: [donationLog],
+      };
+      const block = { timestamp: 1600000000 };
+
+      const fakeProvider = {
+        getTransaction: sinon.stub().resolves(txResponse),
+        getTransactionReceipt: sinon.stub().resolves(receipt),
+        getBlock: sinon.stub().resolves(block),
+      };
+
+      const getTokenDecimalsStub = sinon
+        .stub(evmTransactionService, 'getTokenDecimals')
+        .resolves(18);
+
+      providers.set(100, fakeProvider);
+
+      try {
+        const result = await evmTransactionService.getTransactionInfo({
+          txHash: TX_HASH,
+          networkId: 100,
+          symbol: 'GIV',
+          fromAddress: SAFE_ADDRESS,
+          toAddress: RECIPIENT,
+          amount: 0.5,
+          timestamp: 1600000000,
+          tokenAddress: GIV_TOKEN,
+        });
+
+        expect(result.from).to.equal(SAFE_ADDRESS);
+        expect(result.to).to.equal(RECIPIENT);
+        expect(result.amount).to.equal(0.5);
+      } finally {
+        getTokenDecimalsStub.restore();
+        providers.delete(100);
+      }
+    });
   });
 
   describe('getTransactionInfo (Account Abstraction donation handler)', () => {
