@@ -423,6 +423,175 @@ describe('EvmTransactionService', () => {
         providers.delete(100);
       }
     });
+
+    it('should infer Safe sender from outer Safe transaction target', async () => {
+      const GIV_TOKEN = '0x4f4f9b8d5b4d0dc10506e5551b0513b61fd59e75';
+      const amountRaw = ethers.utils.parseUnits('0.5', 18);
+      const donationLog: ethers.providers.Log = {
+        address: DONATION_HANDLER,
+        blockHash:
+          '0xabcd000000000000000000000000000000000000000000000000000000000000',
+        blockNumber: 12345,
+        data: '0x' + amountRaw.toHexString().slice(2).padStart(64, '0'),
+        logIndex: 0,
+        removed: false,
+        topics: [
+          DONATION_MADE_TOPIC,
+          '0x000000000000000000000000' + RECIPIENT.slice(2).toLowerCase(),
+          '0x000000000000000000000000' + GIV_TOKEN.slice(2).toLowerCase(),
+        ],
+        transactionHash: TX_HASH,
+        transactionIndex: 0,
+      };
+
+      const txResponse = {
+        hash: TX_HASH,
+        from: EXECUTOR_ADDRESS,
+        to: SAFE_ADDRESS,
+        value: ethers.BigNumber.from(0),
+        nonce: 7,
+        blockNumber: 12345,
+        gasPrice: ethers.BigNumber.from(1),
+      };
+      const receipt = {
+        status: 1,
+        blockNumber: 12345,
+        gasUsed: ethers.BigNumber.from(21000),
+        logs: [donationLog],
+      };
+      const block = { timestamp: 1600000000 };
+
+      const fakeProvider = {
+        getTransaction: sinon.stub().resolves(txResponse),
+        getTransactionReceipt: sinon.stub().resolves(receipt),
+        getBlock: sinon.stub().resolves(block),
+      };
+
+      const getTokenDecimalsStub = sinon
+        .stub(evmTransactionService, 'getTokenDecimals')
+        .resolves(18);
+
+      providers.set(100, fakeProvider);
+
+      try {
+        const result = await evmTransactionService.getTransactionInfo({
+          txHash: TX_HASH,
+          networkId: 100,
+          symbol: 'GIV',
+          fromAddress: SAFE_ADDRESS,
+          toAddress: RECIPIENT,
+          amount: 0.5,
+          timestamp: 1600000000,
+          tokenAddress: GIV_TOKEN,
+        });
+
+        expect(result.from).to.equal(SAFE_ADDRESS);
+        expect(result.to).to.equal(RECIPIENT);
+        expect(result.amount).to.equal(0.5);
+      } finally {
+        getTokenDecimalsStub.restore();
+        providers.delete(100);
+      }
+    });
+  });
+
+  describe('getTransactionInfo (Account Abstraction donation handler)', () => {
+    const ENTRYPOINT_ADDRESS = '0x5ff137d4B0fdCD49dcA30c7CF57E578a026d2789';
+    const SMART_ACCOUNT = '0x501ef174B66883Ba40f92E6Fb24bfb49331D4d4C';
+    const DONOR_ADDRESS = '0x1C9B282ceC2bCc27432f1F06eE2532c88634B63F';
+    const RECIPIENT = '0xA743B5aC96F06da66Ca3921AAD06F2A2e040FB02';
+    const DONATION_HANDLER = '0x7a5D2A00a25b95fd8739bc52Cd79f8F971C37Ca1';
+    const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bDa02913';
+    const TX_HASH =
+      '0x375904913077bd62396d58781d69e51acaaa7c87ad9b5d87fd1630f20e5a113e';
+
+    it('should prefer the AA transfer sender over the donation handler log sender', async () => {
+      const amountRaw = ethers.utils.parseUnits('50.01', 6);
+      const donationLog: ethers.providers.Log = {
+        address: DONATION_HANDLER,
+        blockHash:
+          '0xabcd000000000000000000000000000000000000000000000000000000000000',
+        blockNumber: 12345,
+        data: '0x' + amountRaw.toHexString().slice(2).padStart(64, '0'),
+        logIndex: 0,
+        removed: false,
+        topics: [
+          DONATION_MADE_TOPIC,
+          '0x000000000000000000000000' + RECIPIENT.slice(2).toLowerCase(),
+          '0x000000000000000000000000' + USDC_ADDRESS.slice(2).toLowerCase(),
+        ],
+        transactionHash: TX_HASH,
+        transactionIndex: 0,
+      };
+      const transferLog: ethers.providers.Log = {
+        address: USDC_ADDRESS,
+        blockHash:
+          '0xabcd000000000000000000000000000000000000000000000000000000000000',
+        blockNumber: 12345,
+        data: '0x' + amountRaw.toHexString().slice(2).padStart(64, '0'),
+        logIndex: 1,
+        removed: false,
+        topics: [
+          TRANSFER_TOPIC,
+          '0x000000000000000000000000' + DONOR_ADDRESS.slice(2).toLowerCase(),
+          '0x000000000000000000000000' + RECIPIENT.slice(2).toLowerCase(),
+        ],
+        transactionHash: TX_HASH,
+        transactionIndex: 0,
+      };
+
+      const txResponse = {
+        hash: TX_HASH,
+        from: SMART_ACCOUNT,
+        to: ENTRYPOINT_ADDRESS,
+        value: ethers.BigNumber.from(0),
+        nonce: 10,
+        blockNumber: 12345,
+        gasPrice: ethers.BigNumber.from(1),
+      };
+      const receipt = {
+        status: 1,
+        blockNumber: 12345,
+        gasUsed: ethers.BigNumber.from(21000),
+        logs: [donationLog, transferLog],
+      };
+      const block = { timestamp: 1777305051 };
+
+      const fakeProvider = {
+        getTransaction: sinon.stub().resolves(txResponse),
+        getTransactionReceipt: sinon.stub().resolves(receipt),
+        getBlock: sinon.stub().resolves(block),
+      };
+
+      const getTokenDecimalsStub = sinon
+        .stub(evmTransactionService, 'getTokenDecimals')
+        .resolves(6);
+
+      providers.set(8453, fakeProvider);
+
+      try {
+        const result = await evmTransactionService.getTransactionInfo({
+          txHash: TX_HASH,
+          networkId: 8453,
+          symbol: 'USDC',
+          fromAddress: DONOR_ADDRESS,
+          toAddress: RECIPIENT,
+          amount: 50.01,
+          timestamp: 1777305051,
+          tokenAddress: USDC_ADDRESS,
+        });
+
+        expect(result.from.toLowerCase()).to.equal(DONOR_ADDRESS.toLowerCase());
+        expect(result.from.toLowerCase()).to.not.equal(
+          SMART_ACCOUNT.toLowerCase(),
+        );
+        expect(result.to.toLowerCase()).to.equal(RECIPIENT.toLowerCase());
+        expect(result.amount).to.equal(50.01);
+      } finally {
+        getTokenDecimalsStub.restore();
+        providers.delete(8453);
+      }
+    });
   });
 
   describe('getTransactionInfo (Account Abstraction donation handler)', () => {

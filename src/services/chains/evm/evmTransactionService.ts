@@ -702,14 +702,19 @@ export class EvmTransactionService implements IChainHandler {
     receipt: ethers.providers.TransactionReceipt,
   ): string {
     const txTo = tx.to ? normalizeAddress(tx.to) : null;
+    const expectedFrom = normalizeAddress(input.fromAddress);
+    const hasDonationHandlerLog = this.hasDonationHandlerLog(
+      input.networkId,
+      receipt.logs,
+    );
 
     // Safe executions submit the outer transaction to the Safe contract,
     // while the donation handler call happens internally and emits logs.
     if (
-      input.safeTxHash &&
       txTo &&
-      !isDonationHandlerAddress(input.networkId, txTo) &&
-      this.hasDonationHandlerLog(input.networkId, receipt.logs)
+      hasDonationHandlerLog &&
+      ((input.safeTxHash && !isDonationHandlerAddress(input.networkId, txTo)) ||
+        txTo === expectedFrom)
     ) {
       return tx.to!;
     }

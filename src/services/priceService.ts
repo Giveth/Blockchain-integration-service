@@ -30,6 +30,22 @@ const SYMBOL_TOKEN_IDS: Record<string, string> = {
   GIV: 'giveth',
 };
 
+// TODO: Replace with the real FINN mainnet address once deployed.
+export const FINN_MOCK_ADDRESS_MAINNET =
+  '0xb87c3637Eb7C28AaC2C918ED8EC0C3b3b5e8fB67'.toLowerCase();
+
+type FixedPriceEntry = { kind: 'ratio'; baseSymbol: string; ratio: number };
+
+// Tokens whose USD price is derived from another token's price at a fixed
+// ratio. Keyed by `${networkId}:${lowercasedAddress}`.
+const FIXED_PRICE_TOKENS: Record<string, FixedPriceEntry> = {
+  [`1:${FINN_MOCK_ADDRESS_MAINNET}`]: {
+    kind: 'ratio',
+    baseSymbol: 'ETH',
+    ratio: 0.001,
+  },
+};
+
 export class PriceService {
   private readonly coingeckoBaseUrl = 'https://api.coingecko.com/api/v3';
   private priceCache: Map<string, { price: number; timestamp: number }> =
@@ -84,7 +100,14 @@ export class PriceService {
     try {
       let price: number;
 
-      if (tokenAddress) {
+      const fixedEntry = tokenAddress
+        ? FIXED_PRICE_TOKENS[`${networkId}:${tokenAddress.toLowerCase()}`]
+        : undefined;
+
+      if (fixedEntry) {
+        const basePrice = await this.getPriceBySymbol(fixedEntry.baseSymbol);
+        price = basePrice * fixedEntry.ratio;
+      } else if (tokenAddress) {
         // Get price by contract address
         price = await this.getPriceByContractAddress(networkId, tokenAddress);
       } else {
