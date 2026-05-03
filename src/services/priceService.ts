@@ -30,19 +30,26 @@ const SYMBOL_TOKEN_IDS: Record<string, string> = {
   GIV: 'giveth',
 };
 
-// TODO: Replace with the real FINN mainnet address once deployed.
-export const FINN_MOCK_ADDRESS_MAINNET =
+export const FINN_ADDRESS_MAINNET =
   '0xb87c3637Eb7C28AaC2C918ED8EC0C3b3b5e8fB67'.toLowerCase();
+export const TIK_ADDRESS_MAINNET =
+  '0xCE271CA7F18fc04E6744fCF04fef3462eb3C5A94'.toLowerCase();
 
-type FixedPriceEntry = { kind: 'ratio'; baseSymbol: string; ratio: number };
+type FixedPriceEntry =
+  | { kind: 'ratio'; baseSymbol: string; ratio: number }
+  | { kind: 'usd'; price: number };
 
 // Tokens whose USD price is derived from another token's price at a fixed
 // ratio. Keyed by `${networkId}:${lowercasedAddress}`.
 const FIXED_PRICE_TOKENS: Record<string, FixedPriceEntry> = {
-  [`1:${FINN_MOCK_ADDRESS_MAINNET}`]: {
+  [`1:${FINN_ADDRESS_MAINNET}`]: {
     kind: 'ratio',
     baseSymbol: 'ETH',
     ratio: 0.001,
+  },
+  [`1:${TIK_ADDRESS_MAINNET}`]: {
+    kind: 'usd',
+    price: 1,
   },
 };
 
@@ -105,8 +112,12 @@ export class PriceService {
         : undefined;
 
       if (fixedEntry) {
-        const basePrice = await this.getPriceBySymbol(fixedEntry.baseSymbol);
-        price = basePrice * fixedEntry.ratio;
+        if (fixedEntry.kind === 'ratio') {
+          const basePrice = await this.getPriceBySymbol(fixedEntry.baseSymbol);
+          price = basePrice * fixedEntry.ratio;
+        } else {
+          price = fixedEntry.price;
+        }
       } else if (tokenAddress) {
         // Get price by contract address
         price = await this.getPriceByContractAddress(networkId, tokenAddress);

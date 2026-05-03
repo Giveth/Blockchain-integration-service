@@ -1,9 +1,13 @@
 import { expect } from 'chai';
 import sinon from 'sinon';
 import axios from 'axios';
-import { FINN_MOCK_ADDRESS_MAINNET, PriceService } from './priceService';
+import {
+  FINN_ADDRESS_MAINNET,
+  PriceService,
+  TIK_ADDRESS_MAINNET,
+} from './priceService';
 
-describe('PriceService - FINN fixed-price override', () => {
+describe('PriceService - fixed-price overrides', () => {
   let axiosGetStub: sinon.SinonStub;
   let priceService: PriceService;
 
@@ -76,7 +80,7 @@ describe('PriceService - FINN fixed-price override', () => {
     const price = await priceService.getTokenPrice({
       networkId: 1,
       symbol: 'FINN',
-      tokenAddress: FINN_MOCK_ADDRESS_MAINNET,
+      tokenAddress: FINN_ADDRESS_MAINNET,
     });
 
     expect(price).to.equal(2.5);
@@ -92,7 +96,7 @@ describe('PriceService - FINN fixed-price override', () => {
     const price = await priceService.getTokenPrice({
       networkId: 1,
       symbol: 'FINN',
-      tokenAddress: FINN_MOCK_ADDRESS_MAINNET.toUpperCase(),
+      tokenAddress: FINN_ADDRESS_MAINNET.toUpperCase(),
     });
 
     expect(price).to.equal(3);
@@ -108,7 +112,7 @@ describe('PriceService - FINN fixed-price override', () => {
     await priceService.getTokenPrice({
       networkId: 1,
       symbol: 'FINN',
-      tokenAddress: FINN_MOCK_ADDRESS_MAINNET,
+      tokenAddress: FINN_ADDRESS_MAINNET,
     });
 
     const calledUrls = axiosGetStub.getCalls().map((c) => c.args[0]);
@@ -124,17 +128,58 @@ describe('PriceService - FINN fixed-price override', () => {
     const first = await priceService.getTokenPrice({
       networkId: 1,
       symbol: 'FINN',
-      tokenAddress: FINN_MOCK_ADDRESS_MAINNET,
+      tokenAddress: FINN_ADDRESS_MAINNET,
     });
     const second = await priceService.getTokenPrice({
       networkId: 1,
       symbol: 'FINN',
-      tokenAddress: FINN_MOCK_ADDRESS_MAINNET,
+      tokenAddress: FINN_ADDRESS_MAINNET,
     });
 
     expect(first).to.equal(2.5);
     expect(second).to.equal(2.5);
     expect(axiosGetStub.calledOnce).to.be.true;
+  });
+
+  it('returns a hardcoded $1 USD price for TIK on mainnet', async () => {
+    const price = await priceService.getTokenPrice({
+      networkId: 1,
+      symbol: 'TIK',
+      tokenAddress: TIK_ADDRESS_MAINNET,
+    });
+
+    expect(price).to.equal(1);
+    expect(axiosGetStub.notCalled).to.be.true;
+  });
+
+  it('matches the TIK override case-insensitively on the address', async () => {
+    const price = await priceService.getTokenPrice({
+      networkId: 1,
+      symbol: 'TIK',
+      tokenAddress: TIK_ADDRESS_MAINNET.toUpperCase(),
+    });
+
+    expect(price).to.equal(1);
+    expect(axiosGetStub.notCalled).to.be.true;
+  });
+
+  it('still routes TIK through CoinGecko outside Ethereum mainnet', async () => {
+    axiosGetStub.resolves({
+      data: { [TIK_ADDRESS_MAINNET]: { usd: 0.5 } },
+    });
+
+    const price = await priceService.getTokenPrice({
+      networkId: 137,
+      symbol: 'TIK',
+      tokenAddress: TIK_ADDRESS_MAINNET,
+    });
+
+    expect(price).to.equal(0.5);
+    sinon.assert.calledOnceWithExactly(
+      axiosGetStub,
+      `https://api.coingecko.com/api/v3/simple/token_price/polygon-pos?contract_addresses=${TIK_ADDRESS_MAINNET}&vs_currencies=usd`,
+      { timeout: 10000 },
+    );
   });
 
   it('still routes non-FINN ERC-20 tokens through the CoinGecko token_price endpoint', async () => {
