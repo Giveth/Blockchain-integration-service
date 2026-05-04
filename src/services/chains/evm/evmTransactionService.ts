@@ -722,6 +722,46 @@ export class EvmTransactionService implements IChainHandler {
     return tx.from;
   }
 
+  private inferErc20DonationSenderFromFundingTransfer(params: {
+    receipt: ethers.providers.TransactionReceipt;
+    networkId: number;
+    tokenAddress: string;
+    expectedFrom: string;
+    expectedAmount: number;
+    tokenDecimals: number;
+  }): string | null {
+    const {
+      receipt,
+      networkId,
+      tokenAddress,
+      expectedFrom,
+      expectedAmount,
+      tokenDecimals,
+    } = params;
+    const normalizedExpectedFrom = normalizeAddress(expectedFrom);
+    const normalizedTokenAddress = normalizeAddress(tokenAddress);
+    const handlerAddresses = new Set(
+      getDonationHandlerAddresses(networkId).map((address) =>
+        normalizeAddress(address),
+      ),
+    );
+    const expectedAmountRaw = BigInt(
+      ethers.utils
+        .parseUnits(expectedAmount.toString(), tokenDecimals)
+        .toString(),
+    );
+
+    const fundingTransfer = this.parseTransferEvents(receipt.logs).find(
+      (transfer) =>
+        normalizeAddress(transfer.from) === normalizedExpectedFrom &&
+        handlerAddresses.has(normalizeAddress(transfer.to)) &&
+        normalizeAddress(transfer.tokenAddress) === normalizedTokenAddress &&
+        transfer.amount >= expectedAmountRaw,
+    );
+
+    return fundingTransfer ? fundingTransfer.from : null;
+  }
+
   /**
    * Parse DonationMade events from transaction logs
    * Used for both ERC-20 and native token donations through donation handler
@@ -1039,6 +1079,34 @@ export class EvmTransactionService implements IChainHandler {
         amount,
         erc20TokenDecimals,
       );
+
+      if (donationTransfer) {
+        const inferredSender = this.inferErc20DonationSenderFromFundingTransfer(
+          {
+            receipt,
+            networkId,
+            tokenAddress: tokenAddress!,
+            expectedFrom: input.fromAddress,
+            expectedAmount: amount,
+            tokenDecimals: erc20TokenDecimals,
+          },
+        );
+
+        if (inferredSender) {
+          logger.debug(
+            'Inferred ERC-20 donation sender from funding transfer',
+            {
+              txHash,
+              donationEventSender: donationTransfer.from,
+              inferredSender,
+            },
+          );
+          donationTransfer = {
+            ...donationTransfer,
+            from: inferredSender,
+          };
+        }
+      }
 
       // If not found in DonationMade events, try Transfer events
       if (!donationTransfer) {

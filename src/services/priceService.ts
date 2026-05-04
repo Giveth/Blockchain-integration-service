@@ -64,7 +64,11 @@ export class PriceService {
     symbol: string,
     tokenAddress?: string | null,
   ): string {
-    return `${networkId}:${symbol}:${tokenAddress || 'native'}`;
+    if (!tokenAddress) {
+      return `symbol:${symbol.toUpperCase()}`;
+    }
+
+    return `${networkId}:${symbol.toUpperCase()}:${tokenAddress.toLowerCase()}`;
   }
 
   private getCachedPrice(
@@ -72,14 +76,22 @@ export class PriceService {
     symbol: string,
     tokenAddress?: string | null,
   ): number | null {
-    const key = this.getCacheKey(networkId, symbol, tokenAddress);
-    const cached = this.priceCache.get(key);
+    const cached = this.getCachedPriceEntry(networkId, symbol, tokenAddress);
 
     if (cached && Date.now() - cached.timestamp < this.cacheTtlMs) {
       return cached.price;
     }
 
     return null;
+  }
+
+  private getCachedPriceEntry(
+    networkId: number,
+    symbol: string,
+    tokenAddress?: string | null,
+  ): { price: number; timestamp: number } | null {
+    const key = this.getCacheKey(networkId, symbol, tokenAddress);
+    return this.priceCache.get(key) ?? null;
   }
 
   private setCachedPrice(
@@ -132,6 +144,22 @@ export class PriceService {
       logger.debug('Token price fetched', { symbol, price });
       return price;
     } catch (error) {
+      const staleCachedPrice = this.getCachedPriceEntry(
+        networkId,
+        symbol,
+        tokenAddress,
+      );
+      if (staleCachedPrice) {
+        logger.warn('Using stale cached token price after fetch failure', {
+          networkId,
+          symbol,
+          tokenAddress,
+          price: staleCachedPrice.price,
+          ageMs: Date.now() - staleCachedPrice.timestamp,
+        });
+        return staleCachedPrice.price;
+      }
+
       logger.error('Failed to fetch token price', {
         error: error instanceof Error ? error.message : 'Unknown error',
         networkId,
