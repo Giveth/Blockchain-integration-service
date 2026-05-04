@@ -141,6 +141,45 @@ describe('PriceService - fixed-price overrides', () => {
     expect(axiosGetStub.calledOnce).to.be.true;
   });
 
+  it('shares native symbol prices across networks to avoid duplicate CoinGecko calls', async () => {
+    axiosGetStub.resolves({
+      data: { ethereum: { usd: 2500 } },
+    });
+
+    const mainnetPrice = await priceService.getTokenPrice({
+      networkId: 1,
+      symbol: 'ETH',
+    });
+    const optimismPrice = await priceService.getTokenPrice({
+      networkId: 10,
+      symbol: 'ETH',
+    });
+
+    expect(mainnetPrice).to.equal(2500);
+    expect(optimismPrice).to.equal(2500);
+    expect(axiosGetStub.calledOnce).to.be.true;
+  });
+
+  it('uses stale cached native prices when CoinGecko is temporarily unavailable', async () => {
+    const cache = (
+      priceService as unknown as {
+        priceCache: Map<string, { price: number; timestamp: number }>;
+      }
+    ).priceCache;
+    cache.set('symbol:ETH', {
+      price: 2500,
+      timestamp: Date.now() - 120_000,
+    });
+    axiosGetStub.rejects(new Error('Request failed with status code 429'));
+
+    const price = await priceService.getTokenPrice({
+      networkId: 10,
+      symbol: 'ETH',
+    });
+
+    expect(price).to.equal(2500);
+  });
+
   it('returns a hardcoded $1 USD price for TIK on mainnet', async () => {
     const price = await priceService.getTokenPrice({
       networkId: 1,
