@@ -495,6 +495,110 @@ describe('EvmTransactionService', () => {
     });
   });
 
+  describe('getTransactionInfo (sponsored donation handler)', () => {
+    const RELAYER_ADDRESS = '0xB42F812A44c22cc6b861478900401ee759EbEAD6';
+    const DONOR_ADDRESS = '0x65279542f9312620a67469b042a8bb6851904442';
+    const RECIPIENT = '0x4d9339dd97db55e3b9bcbe65de39ff9c04d1c2cd';
+    const DONATION_HANDLER = '0x6e349C56F512cB4250276BF36335c8dd618944A1';
+    const USDC_ADDRESS = '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359';
+    const TX_HASH =
+      '0xf2f47c7c977933f08e57c13323b3f53d5ab65e6e132f626b9aba9ae635532f76';
+
+    it('should attribute ERC-20 donation handler events to the funding transfer sender', async () => {
+      const donationAmountRaw = ethers.utils.parseUnits('1', 6);
+      const fundingAmountRaw = ethers.utils.parseUnits('11', 6);
+      const donationLog: ethers.providers.Log = {
+        address: DONATION_HANDLER,
+        blockHash:
+          '0xabcd000000000000000000000000000000000000000000000000000000000000',
+        blockNumber: 12345,
+        data: '0x' + donationAmountRaw.toHexString().slice(2).padStart(64, '0'),
+        logIndex: 0,
+        removed: false,
+        topics: [
+          DONATION_MADE_TOPIC,
+          '0x000000000000000000000000' + RECIPIENT.slice(2).toLowerCase(),
+          '0x000000000000000000000000' + USDC_ADDRESS.slice(2).toLowerCase(),
+        ],
+        transactionHash: TX_HASH,
+        transactionIndex: 0,
+      };
+      const fundingTransferLog: ethers.providers.Log = {
+        address: USDC_ADDRESS,
+        blockHash:
+          '0xabcd000000000000000000000000000000000000000000000000000000000000',
+        blockNumber: 12345,
+        data: '0x' + fundingAmountRaw.toHexString().slice(2).padStart(64, '0'),
+        logIndex: 1,
+        removed: false,
+        topics: [
+          TRANSFER_TOPIC,
+          '0x000000000000000000000000' + DONOR_ADDRESS.slice(2).toLowerCase(),
+          '0x000000000000000000000000' +
+            DONATION_HANDLER.slice(2).toLowerCase(),
+        ],
+        transactionHash: TX_HASH,
+        transactionIndex: 0,
+      };
+
+      const txResponse = {
+        hash: TX_HASH,
+        from: RELAYER_ADDRESS,
+        to: DONATION_HANDLER,
+        value: ethers.BigNumber.from(0),
+        nonce: 10,
+        blockNumber: 12345,
+        gasPrice: ethers.BigNumber.from(1),
+      };
+      const receipt = {
+        status: 1,
+        blockNumber: 12345,
+        gasUsed: ethers.BigNumber.from(21000),
+        logs: [donationLog, fundingTransferLog],
+      };
+      const block = { timestamp: 1777305051 };
+
+      const fakeProvider = {
+        getTransaction: sinon.stub().resolves(txResponse),
+        getTransactionReceipt: sinon.stub().resolves(receipt),
+        getBlock: sinon.stub().resolves(block),
+      };
+
+      const getTokenDecimalsStub = sinon
+        .stub(evmTransactionService, 'getTokenDecimals')
+        .resolves(6);
+      const getTokenSymbolStub = sinon
+        .stub(evmTransactionService, 'getTokenSymbol')
+        .resolves('USDC');
+
+      providers.set(137, fakeProvider);
+
+      try {
+        const result = await evmTransactionService.getTransactionInfo({
+          txHash: TX_HASH,
+          networkId: 137,
+          symbol: 'USDC',
+          fromAddress: DONOR_ADDRESS,
+          toAddress: RECIPIENT,
+          amount: 1,
+          timestamp: 1777305051,
+          tokenAddress: USDC_ADDRESS,
+        });
+
+        expect(result.from.toLowerCase()).to.equal(DONOR_ADDRESS.toLowerCase());
+        expect(result.from.toLowerCase()).to.not.equal(
+          RELAYER_ADDRESS.toLowerCase(),
+        );
+        expect(result.to.toLowerCase()).to.equal(RECIPIENT.toLowerCase());
+        expect(result.amount).to.equal(1);
+      } finally {
+        getTokenDecimalsStub.restore();
+        getTokenSymbolStub.restore();
+        providers.delete(137);
+      }
+    });
+  });
+
   describe('getTransactionInfo (Account Abstraction donation handler)', () => {
     const ENTRYPOINT_ADDRESS = '0x5ff137d4B0fdCD49dcA30c7CF57E578a026d2789';
     const SMART_ACCOUNT = '0x501ef174B66883Ba40f92E6Fb24bfb49331D4d4C';
