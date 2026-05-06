@@ -9,7 +9,10 @@ export const DONATION_HANDLER_ADDRESSES: Record<number, string[]> = {
     '0x97b2cb568e0880B99Cd16EFc6edFF5272Aa02676', // Giveth Donation Handler on Ethereum Mainnet
   ],
   [NetworkId.POLYGON]: [
-    '0x6e349C56F512cB4250276BF36335c8dd618944A1', // Giveth Donation Handler on Polygon
+    '0x4102E15f4621Fc45fCe8E07442A702BD49fcea4b', // Giveth Donation Handler on Polygon
+    // Legacy Polygon handler kept for verifying historical donations.
+    // The frontend no longer sends new donations to this address.
+    '0x6e349C56F512cB4250276BF36335c8dd618944A1',
   ],
   [NetworkId.OPTIMISM]: [
     '0x8D685A56C51Cf54685d3dB0Ea50748D3A2c2e0dC', // Giveth Donation Handler on Optimism
