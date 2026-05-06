@@ -13,6 +13,9 @@ describe('Donation Handlers Config', () => {
       expect(polygonHandlers).to.be.an('array');
       expect(polygonHandlers.length).to.be.greaterThan(0);
       expect(polygonHandlers).to.include(
+        '0x4102E15f4621Fc45fCe8E07442A702BD49fcea4b',
+      );
+      expect(polygonHandlers).to.include(
         '0x6e349C56F512cB4250276BF36335c8dd618944A1',
       );
     });
@@ -22,7 +25,7 @@ describe('Donation Handlers Config', () => {
     it('should return true for known donation handler on Polygon', () => {
       const result = isDonationHandlerAddress(
         NetworkId.POLYGON,
-        '0x6e349C56F512cB4250276BF36335c8dd618944A1',
+        '0x4102E15f4621Fc45fCe8E07442A702BD49fcea4b',
       );
       expect(result).to.be.true;
     });
@@ -30,15 +33,23 @@ describe('Donation Handlers Config', () => {
     it('should be case-insensitive', () => {
       const resultLower = isDonationHandlerAddress(
         NetworkId.POLYGON,
-        '0x6e349c56f512cb4250276bf36335c8dd618944a1',
+        '0x4102e15f4621fc45fce8e07442a702bd49fcea4b',
       );
       const resultUpper = isDonationHandlerAddress(
         NetworkId.POLYGON,
-        '0x6E349C56F512CB4250276BF36335C8DD618944A1',
+        '0x4102E15F4621FC45FCE8E07442A702BD49FCEA4B',
       );
 
       expect(resultLower).to.be.true;
       expect(resultUpper).to.be.true;
+    });
+
+    it('should keep accepting the legacy Polygon handler', () => {
+      const result = isDonationHandlerAddress(
+        NetworkId.POLYGON,
+        '0x6e349C56F512cB4250276BF36335c8dd618944A1',
+      );
+      expect(result).to.be.true;
     });
 
     it('should return false for unknown addresses', () => {
@@ -52,7 +63,7 @@ describe('Donation Handlers Config', () => {
     it('should return false for unsupported networks', () => {
       const result = isDonationHandlerAddress(
         999999,
-        '0x6e349C56F512cB4250276BF36335c8dd618944A1',
+        '0x4102E15f4621Fc45fCe8E07442A702BD49fcea4b',
       );
       expect(result).to.be.false;
     });
