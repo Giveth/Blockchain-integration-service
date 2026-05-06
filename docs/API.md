@@ -490,7 +490,7 @@ To add support for new donation handler contracts, update the configuration in `
 ```typescript
 export const DONATION_HANDLER_ADDRESSES: Record<number, string[]> = {
   [NetworkId.POLYGON]: [
-    '0x4102E15f4621Fc45fCe8E07442A702BD49fcea4b', // Existing handler
+    '0x4102E15f4621Fc45fCe8E07442A702BD49fcea4b', // Active handler
     '0x6e349C56F512cB4250276BF36335c8dd618944A1', // Legacy handler, no longer used by FE
     '0xNEW_HANDLER_ADDRESS', // Add new handlers here
   ],
