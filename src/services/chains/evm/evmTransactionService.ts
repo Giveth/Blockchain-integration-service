@@ -66,6 +66,35 @@ export interface DonationTransferInfo {
 export class EvmTransactionService implements IChainHandler {
   private providers: Map<number, ethers.providers.JsonRpcProvider> = new Map();
 
+  private formatAmountForTokenDecimals(
+    amount: number,
+    tokenDecimals: number,
+  ): string {
+    if (!Number.isFinite(amount)) {
+      throw new Error(`Invalid token amount: ${amount}`);
+    }
+
+    const fractionDigits = Math.min(Math.max(tokenDecimals + 12, 20), 100);
+    const [whole, fraction = ''] = amount.toFixed(fractionDigits).split('.');
+    const clampedFraction = fraction.slice(0, tokenDecimals).replace(/0+$/, '');
+
+    return clampedFraction ? `${whole}.${clampedFraction}` : whole;
+  }
+
+  private parseExpectedAmountRaw(
+    expectedAmount: number,
+    tokenDecimals: number,
+  ): bigint {
+    return BigInt(
+      ethers.utils
+        .parseUnits(
+          this.formatAmountForTokenDecimals(expectedAmount, tokenDecimals),
+          tokenDecimals,
+        )
+        .toString(),
+    );
+  }
+
   isSupported(networkId: number): boolean {
     try {
       return getChainType(networkId) === ChainType.EVM;
@@ -745,10 +774,9 @@ export class EvmTransactionService implements IChainHandler {
         normalizeAddress(address),
       ),
     );
-    const expectedAmountRaw = BigInt(
-      ethers.utils
-        .parseUnits(expectedAmount.toString(), tokenDecimals)
-        .toString(),
+    const expectedAmountRaw = this.parseExpectedAmountRaw(
+      expectedAmount,
+      tokenDecimals,
     );
 
     const fundingTransfer = this.parseTransferEvents(receipt.logs).find(
@@ -843,10 +871,9 @@ export class EvmTransactionService implements IChainHandler {
 
     // If multiple transfers and we have an expected amount, find the closest match
     if (expectedAmount !== undefined) {
-      const expectedAmountBigInt = BigInt(
-        ethers.utils
-          .parseUnits(expectedAmount.toString(), tokenDecimals)
-          .toString(),
+      const expectedAmountBigInt = this.parseExpectedAmountRaw(
+        expectedAmount,
+        tokenDecimals,
       );
 
       // Find transfer with closest amount (within 1% tolerance)

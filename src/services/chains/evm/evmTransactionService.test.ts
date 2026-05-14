@@ -222,6 +222,35 @@ describe('EvmTransactionService', () => {
       expect(result!.amount).to.equal(BigInt('1250000'));
     });
 
+    it('should match when expected amount has more fractional digits than token decimals', () => {
+      const usdcTransfers: DonationTransferInfo[] = [
+        {
+          from: '0x214ED6e90C8BE22B6091775c1AA870Ac8CA1CBe3',
+          to: '0xd7095B0618609feF9e542D5A1D320502C8544D10',
+          amount: BigInt('5050343'), // 5.050343 USDC
+          tokenAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+          isNativeToken: false,
+        },
+        {
+          from: '0x214ED6e90C8BE22B6091775c1AA870Ac8CA1CBe3',
+          to: '0xd7095B0618609feF9e542D5A1D320502C8544D10',
+          amount: BigInt('10000000'), // 10 USDC
+          tokenAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+          isNativeToken: false,
+        },
+      ];
+
+      const result = evmTransactionService.findDonationTransfer(
+        usdcTransfers,
+        '0xd7095B0618609feF9e542D5A1D320502C8544D10',
+        5.050343423352787,
+        6,
+      );
+
+      expect(result).to.not.be.null;
+      expect(result!.amount).to.equal(BigInt('5050343'));
+    });
+
     it('should not use 18 decimals for 6-decimal token (wrong decimals pick wrong transfer)', () => {
       // Two USDC transfers. With 6 decimals, expected 100 matches 100 USDC. With 18 decimals, no match so first is returned.
       const usdcTransfers: DonationTransferInfo[] = [
