@@ -17,6 +17,9 @@ export const DONATION_HANDLER_ADDRESSES: Record<number, string[]> = {
   [NetworkId.OPTIMISM]: [
     '0x8D685A56C51Cf54685d3dB0Ea50748D3A2c2e0dC', // Giveth Donation Handler on Optimism
   ],
+  [NetworkId.OPTIMISM_SEPOLIA]: [
+    '0x0810d67AF8A815761C6E50A736aCd5EB0630606F', // Giveth Donation Handler on Optimism Sepolia (staging)
+  ],
   [NetworkId.ARBITRUM]: [
     '0x97b2cb568e0880B99Cd16EFc6edFF5272Aa02676', // Giveth Donation Handler on Arbitrum
   ],
