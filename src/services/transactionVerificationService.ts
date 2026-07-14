@@ -18,7 +18,10 @@ import {
   normalizeAddress,
 } from '../utils/validation';
 import { config } from '../config';
-import { evmTransactionService } from './chains/evm/evmTransactionService';
+import {
+  evmTransactionService,
+  DonationHandlerLogsResult,
+} from './chains/evm/evmTransactionService';
 
 export class TransactionVerificationService {
   private async validateTransaction(
@@ -258,6 +261,29 @@ export class TransactionVerificationService {
       });
       throw error;
     }
+  }
+
+  /**
+   * Fetch `DonationMade` events from the DonationHandler contract(s) of an EVM
+   * network over a block range, used by the core reconciler cron (#393) to
+   * catch missed and headless donations. Delegates to the EVM chain handler.
+   */
+  async getDonationHandlerLogs(
+    networkId: number,
+    fromBlock?: number,
+    toBlock?: number,
+  ): Promise<DonationHandlerLogsResult> {
+    logger.debug('Fetching DonationMade logs', {
+      networkId,
+      fromBlock,
+      toBlock,
+    });
+
+    return evmTransactionService.getDonationHandlerLogs(
+      networkId,
+      fromBlock,
+      toBlock,
+    );
   }
 
   async checkErc721Ownership(

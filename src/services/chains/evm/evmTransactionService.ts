@@ -63,6 +63,30 @@ export interface DonationTransferInfo {
   isNativeToken?: boolean;
 }
 
+// A single decoded DonationMade event, enriched with the transaction sender and
+// block timestamp, returned by the block-range reconciler scan (#393). `amount`
+// is the raw on-chain value in wei, serialized as a string because a JS bigint
+// is not JSON-serializable.
+export interface DonationMadeLog {
+  transactionHash: string;
+  logIndex: number;
+  blockNumber: number;
+  blockTimestamp: number;
+  from: string;
+  to: string;
+  tokenAddress: string;
+  amount: string;
+  isNativeToken: boolean;
+}
+
+export interface DonationHandlerLogsResult {
+  networkId: number;
+  fromBlock: number;
+  toBlock: number;
+  latestBlock: number;
+  logs: DonationMadeLog[];
+}
+
 export class EvmTransactionService implements IChainHandler {
   private providers: Map<number, ethers.providers.JsonRpcProvider> = new Map();
 
@@ -893,6 +917,169 @@ export class EvmTransactionService implements IChainHandler {
 
     // Return the first matching transfer if no exact match found
     return matchingTransfers[0];
+  }
+
+  /**
+   * Return the current head block number for an EVM network.
+   */
+  async getLatestBlockNumber(networkId: number): Promise<number> {
+    const provider = this.getProvider(networkId);
+    try {
+      return await provider.getBlockNumber();
+    } catch (error) {
+      throw new BlockchainError(
+        BlockchainErrorCode.NETWORK_ERROR,
+        `Failed to fetch latest block for network ${networkId}: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`,
+        { networkId },
+      );
+    }
+  }
+
+  /**
+   * Scan `DonationMade` events emitted by the DonationHandler contract(s) of an
+   * EVM network over a block range (#393 reconciler). Each returned event is
+   * decoded (recipient, token, amount) and enriched with the transaction sender
+   * (`from`) and the block timestamp, so the core reconciler cron can attribute
+   * a missed/headless donation to a user and place it in the correct GIVbacks
+   * round without touching the chain itself.
+   *
+   * When `fromBlock`/`toBlock` are omitted the method runs in "latest-only"
+   * mode: it returns the current head block and no logs, letting the caller
+   * seed its per-chain cursor without a historical scan.
+   */
+  async getDonationHandlerLogs(
+    networkId: number,
+    fromBlock?: number,
+    toBlock?: number,
+  ): Promise<DonationHandlerLogsResult> {
+    if (!this.isSupported(networkId)) {
+      throw new BlockchainError(
+        BlockchainErrorCode.UNSUPPORTED_CHAIN,
+        `Network ${networkId} is not a supported EVM chain`,
+        { networkId },
+      );
+    }
+
+    // getProvider throws INVALID_NETWORK_ID when no RPC URL is configured.
+    const provider = this.getProvider(networkId);
+    const latestBlock = await this.getLatestBlockNumber(networkId);
+
+    // Latest-only mode: no range requested.
+    if (fromBlock === undefined || toBlock === undefined) {
+      return {
+        networkId,
+        fromBlock: latestBlock,
+        toBlock: latestBlock,
+        latestBlock,
+        logs: [],
+      };
+    }
+
+    // Never scan past the current head; getLogs against an out-of-range
+    // toBlock errors on some RPCs.
+    const effectiveTo = Math.min(toBlock, latestBlock);
+    if (fromBlock > effectiveTo) {
+      return {
+        networkId,
+        fromBlock,
+        toBlock: effectiveTo,
+        latestBlock,
+        logs: [],
+      };
+    }
+
+    const handlers = getDonationHandlerAddresses(networkId);
+    if (handlers.length === 0) {
+      return {
+        networkId,
+        fromBlock,
+        toBlock: effectiveTo,
+        latestBlock,
+        logs: [],
+      };
+    }
+
+    // ethers v5 getLogs accepts a single `address`; some networks (Polygon)
+    // have more than one handler, so scan each address and merge.
+    const rawLogs: ethers.providers.Log[] = [];
+    for (const handler of handlers) {
+      try {
+        const logs = await provider.getLogs({
+          address: handler,
+          topics: [DONATION_MADE_EVENT_SIGNATURE],
+          fromBlock,
+          toBlock: effectiveTo,
+        });
+        rawLogs.push(...logs);
+      } catch (error) {
+        throw new BlockchainError(
+          BlockchainErrorCode.NETWORK_ERROR,
+          `Failed to fetch DonationMade logs for network ${networkId} blocks ${fromBlock}-${effectiveTo}: ${
+            error instanceof Error ? error.message : 'Unknown error'
+          }`,
+          { networkId, fromBlock, toBlock: effectiveTo, handler },
+        );
+      }
+    }
+
+    // Enrich each log with the tx sender + block timestamp, caching per-tx and
+    // per-block so a batch/donation-box tx (multiple events in one tx) or many
+    // events in one block only cost one extra RPC call each.
+    const blockTimestampCache = new Map<number, number>();
+    const txSenderCache = new Map<string, string>();
+    const logs: DonationMadeLog[] = [];
+
+    for (const log of rawLogs) {
+      if (
+        log.topics[0] !== DONATION_MADE_EVENT_SIGNATURE ||
+        log.topics.length < 3
+      ) {
+        continue;
+      }
+
+      const to = '0x' + log.topics[1].substring(26);
+      const rawTokenAddress = '0x' + log.topics[2].substring(26);
+      const amount = ethers.BigNumber.from(
+        '0x' + log.data.substring(2, 66),
+      ).toString();
+      const isNativeToken =
+        rawTokenAddress.toLowerCase() === NATIVE_TOKEN_ADDRESS.toLowerCase();
+
+      let blockTimestamp = blockTimestampCache.get(log.blockNumber);
+      if (blockTimestamp === undefined) {
+        const block = await provider.getBlock(log.blockNumber);
+        blockTimestamp = block?.timestamp ?? 0;
+        blockTimestampCache.set(log.blockNumber, blockTimestamp);
+      }
+
+      let from = txSenderCache.get(log.transactionHash);
+      if (from === undefined) {
+        const tx = await provider.getTransaction(log.transactionHash);
+        from = tx?.from ?? '';
+        txSenderCache.set(log.transactionHash, from);
+      }
+
+      logs.push({
+        transactionHash: log.transactionHash,
+        logIndex: log.logIndex,
+        blockNumber: log.blockNumber,
+        blockTimestamp,
+        from,
+        to,
+        tokenAddress: isNativeToken ? NATIVE_TOKEN_ADDRESS : rawTokenAddress,
+        amount,
+        isNativeToken,
+      });
+    }
+
+    // Deterministic ordering so the cron processes events chronologically.
+    logs.sort(
+      (a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex,
+    );
+
+    return { networkId, fromBlock, toBlock: effectiveTo, latestBlock, logs };
   }
 
   /**
