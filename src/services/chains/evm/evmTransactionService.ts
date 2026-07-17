@@ -34,6 +34,11 @@ const DONATION_MADE_EVENT_SIGNATURE =
 // Native token address (used in DonationMade events for ETH/MATIC donations)
 const NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
 
+// Bounded concurrency for enriching DonationMade logs (block-timestamp + tx-
+// sender lookups), so a wide range with many events doesn't burst the RPC with
+// an unbounded number of in-flight requests.
+const LOG_ENRICHMENT_CONCURRENCY = 8;
+
 // EIP-4337 EntryPoint contracts (v0.6 + v0.7)
 const ERC4337_ENTRYPOINT_ADDRESSES = new Set<string>([
   '0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789',
@@ -1024,62 +1029,115 @@ export class EvmTransactionService implements IChainHandler {
       }
     }
 
-    // Enrich each log with the tx sender + block timestamp, caching per-tx and
-    // per-block so a batch/donation-box tx (multiple events in one tx) or many
-    // events in one block only cost one extra RPC call each.
-    const blockTimestampCache = new Map<number, number>();
-    const txSenderCache = new Map<string, string>();
-    const logs: DonationMadeLog[] = [];
-
-    for (const log of rawLogs) {
-      if (
-        log.topics[0] !== DONATION_MADE_EVENT_SIGNATURE ||
-        log.topics.length < 3
-      ) {
-        continue;
-      }
-
-      const to = '0x' + log.topics[1].substring(26);
-      const rawTokenAddress = '0x' + log.topics[2].substring(26);
-      const amount = ethers.BigNumber.from(
-        '0x' + log.data.substring(2, 66),
-      ).toString();
-      const isNativeToken =
-        rawTokenAddress.toLowerCase() === NATIVE_TOKEN_ADDRESS.toLowerCase();
-
-      let blockTimestamp = blockTimestampCache.get(log.blockNumber);
-      if (blockTimestamp === undefined) {
-        const block = await provider.getBlock(log.blockNumber);
-        blockTimestamp = block?.timestamp ?? 0;
-        blockTimestampCache.set(log.blockNumber, blockTimestamp);
-      }
-
-      let from = txSenderCache.get(log.transactionHash);
-      if (from === undefined) {
-        const tx = await provider.getTransaction(log.transactionHash);
-        from = tx?.from ?? '';
-        txSenderCache.set(log.transactionHash, from);
-      }
-
-      logs.push({
-        transactionHash: log.transactionHash,
-        logIndex: log.logIndex,
-        blockNumber: log.blockNumber,
-        blockTimestamp,
-        from,
-        to,
-        tokenAddress: isNativeToken ? NATIVE_TOKEN_ADDRESS : rawTokenAddress,
-        amount,
-        isNativeToken,
+    // Decode the DonationMade logs, then enrich each with its block timestamp
+    // and transaction sender. Block/tx lookups are de-duplicated (a batch tx
+    // emits multiple events; many events can share a block) and fetched with
+    // bounded concurrency so a wide range with many events doesn't fan out into
+    // an unbounded burst of serial RPC round trips.
+    const decoded = rawLogs
+      .filter(
+        (log) =>
+          log.topics[0] === DONATION_MADE_EVENT_SIGNATURE &&
+          log.topics.length >= 3,
+      )
+      .map((log) => {
+        const rawTokenAddress = '0x' + log.topics[2].substring(26);
+        const isNativeToken =
+          rawTokenAddress.toLowerCase() === NATIVE_TOKEN_ADDRESS.toLowerCase();
+        return {
+          transactionHash: log.transactionHash,
+          logIndex: log.logIndex,
+          blockNumber: log.blockNumber,
+          to: '0x' + log.topics[1].substring(26),
+          tokenAddress: isNativeToken ? NATIVE_TOKEN_ADDRESS : rawTokenAddress,
+          amount: ethers.BigNumber.from(
+            '0x' + log.data.substring(2, 66),
+          ).toString(),
+          isNativeToken,
+        };
       });
-    }
 
-    // Deterministic ordering so the cron processes events chronologically.
-    logs.sort(
-      (a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex,
-    );
+    const uniqueBlockNumbers = [...new Set(decoded.map((d) => d.blockNumber))];
+    const uniqueTxHashes = [...new Set(decoded.map((d) => d.transactionHash))];
+
+    // Missing block/tx results (RPC hiccup, pruning, reorg) would corrupt the
+    // record (block timestamp -> wrong donation date, empty sender -> dropped
+    // donation), so fail the whole scan instead — the caller retries the range.
+    const [blockEntries, txEntries] = await Promise.all([
+      this.mapWithConcurrency(
+        uniqueBlockNumbers,
+        LOG_ENRICHMENT_CONCURRENCY,
+        async (blockNumber): Promise<[number, number]> => {
+          const block = await provider.getBlock(blockNumber);
+          if (!block) {
+            throw new BlockchainError(
+              BlockchainErrorCode.NETWORK_ERROR,
+              `Block ${blockNumber} was unavailable during log enrichment on network ${networkId}`,
+              { networkId, blockNumber },
+            );
+          }
+          return [blockNumber, block.timestamp];
+        },
+      ),
+      this.mapWithConcurrency(
+        uniqueTxHashes,
+        LOG_ENRICHMENT_CONCURRENCY,
+        async (transactionHash): Promise<[string, string]> => {
+          const tx = await provider.getTransaction(transactionHash);
+          if (!tx) {
+            throw new BlockchainError(
+              BlockchainErrorCode.NETWORK_ERROR,
+              `Transaction ${transactionHash} was unavailable during log enrichment on network ${networkId}`,
+              { networkId, transactionHash },
+            );
+          }
+          return [transactionHash, tx.from];
+        },
+      ),
+    ]);
+
+    const blockTimestamps = new Map<number, number>(blockEntries);
+    const txSenders = new Map<string, string>(txEntries);
+
+    const logs: DonationMadeLog[] = decoded
+      .map((d) => ({
+        transactionHash: d.transactionHash,
+        logIndex: d.logIndex,
+        blockNumber: d.blockNumber,
+        blockTimestamp: blockTimestamps.get(d.blockNumber) as number,
+        from: txSenders.get(d.transactionHash) as string,
+        to: d.to,
+        tokenAddress: d.tokenAddress,
+        amount: d.amount,
+        isNativeToken: d.isNativeToken,
+      }))
+      // Deterministic ordering so the cron processes events chronologically.
+      .sort((a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex);
 
     return { networkId, fromBlock, toBlock: effectiveTo, latestBlock, logs };
+  }
+
+  /**
+   * Map over items with a bounded number of in-flight async operations, so a
+   * large batch of RPC lookups doesn't burst the provider. Rejects as soon as
+   * any task throws (workers stop pulling new work once the batch settles).
+   */
+  private async mapWithConcurrency<T, R>(
+    items: T[],
+    limit: number,
+    fn: (item: T) => Promise<R>,
+  ): Promise<R[]> {
+    const results: R[] = new Array(items.length);
+    let next = 0;
+    const runWorker = async (): Promise<void> => {
+      while (next < items.length) {
+        const index = next++;
+        results[index] = await fn(items[index]);
+      }
+    };
+    const workerCount = Math.min(Math.max(limit, 1), items.length);
+    await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+    return results;
   }
 
   /**
