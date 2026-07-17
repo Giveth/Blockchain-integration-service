@@ -34,6 +34,11 @@ const DONATION_MADE_EVENT_SIGNATURE =
 // Native token address (used in DonationMade events for ETH/MATIC donations)
 const NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
 
+// Bounded concurrency for enriching DonationMade logs (block-timestamp + tx-
+// sender lookups), so a wide range with many events doesn't burst the RPC with
+// an unbounded number of in-flight requests.
+const LOG_ENRICHMENT_CONCURRENCY = 8;
+
 // EIP-4337 EntryPoint contracts (v0.6 + v0.7)
 const ERC4337_ENTRYPOINT_ADDRESSES = new Set<string>([
   '0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789',
@@ -61,6 +66,30 @@ export interface DonationTransferInfo {
   amount: bigint;
   tokenAddress: string;
   isNativeToken?: boolean;
+}
+
+// A single decoded DonationMade event, enriched with the transaction sender and
+// block timestamp, returned by the block-range reconciler scan (#393). `amount`
+// is the raw on-chain value in wei, serialized as a string because a JS bigint
+// is not JSON-serializable.
+export interface DonationMadeLog {
+  transactionHash: string;
+  logIndex: number;
+  blockNumber: number;
+  blockTimestamp: number;
+  from: string;
+  to: string;
+  tokenAddress: string;
+  amount: string;
+  isNativeToken: boolean;
+}
+
+export interface DonationHandlerLogsResult {
+  networkId: number;
+  fromBlock: number;
+  toBlock: number;
+  latestBlock: number;
+  logs: DonationMadeLog[];
 }
 
 export class EvmTransactionService implements IChainHandler {
@@ -893,6 +922,222 @@ export class EvmTransactionService implements IChainHandler {
 
     // Return the first matching transfer if no exact match found
     return matchingTransfers[0];
+  }
+
+  /**
+   * Return the current head block number for an EVM network.
+   */
+  async getLatestBlockNumber(networkId: number): Promise<number> {
+    const provider = this.getProvider(networkId);
+    try {
+      return await provider.getBlockNumber();
+    } catch (error) {
+      throw new BlockchainError(
+        BlockchainErrorCode.NETWORK_ERROR,
+        `Failed to fetch latest block for network ${networkId}: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`,
+        { networkId },
+      );
+    }
+  }
+
+  /**
+   * Scan `DonationMade` events emitted by the DonationHandler contract(s) of an
+   * EVM network over a block range (#393 reconciler). Each returned event is
+   * decoded (recipient, token, amount) and enriched with the transaction sender
+   * (`from`) and the block timestamp, so the core reconciler cron can attribute
+   * a missed/headless donation to a user and place it in the correct GIVbacks
+   * round without touching the chain itself.
+   *
+   * When `fromBlock`/`toBlock` are omitted the method runs in "latest-only"
+   * mode: it returns the current head block and no logs, letting the caller
+   * seed its per-chain cursor without a historical scan.
+   */
+  async getDonationHandlerLogs(
+    networkId: number,
+    fromBlock?: number,
+    toBlock?: number,
+  ): Promise<DonationHandlerLogsResult> {
+    if (!this.isSupported(networkId)) {
+      throw new BlockchainError(
+        BlockchainErrorCode.UNSUPPORTED_CHAIN,
+        `Network ${networkId} is not a supported EVM chain`,
+        { networkId },
+      );
+    }
+
+    // getProvider throws INVALID_NETWORK_ID when no RPC URL is configured.
+    const provider = this.getProvider(networkId);
+    const latestBlock = await this.getLatestBlockNumber(networkId);
+
+    // Latest-only mode: no range requested.
+    if (fromBlock === undefined || toBlock === undefined) {
+      return {
+        networkId,
+        fromBlock: latestBlock,
+        toBlock: latestBlock,
+        latestBlock,
+        logs: [],
+      };
+    }
+
+    // Never scan past the current head; getLogs against an out-of-range
+    // toBlock errors on some RPCs.
+    const effectiveTo = Math.min(toBlock, latestBlock);
+    if (fromBlock > effectiveTo) {
+      return {
+        networkId,
+        fromBlock,
+        toBlock: effectiveTo,
+        latestBlock,
+        logs: [],
+      };
+    }
+
+    const handlers = getDonationHandlerAddresses(networkId);
+    if (handlers.length === 0) {
+      return {
+        networkId,
+        fromBlock,
+        toBlock: effectiveTo,
+        latestBlock,
+        logs: [],
+      };
+    }
+
+    // ethers v5 getLogs accepts a single `address`; some networks (Polygon)
+    // have more than one handler, so scan each address and merge.
+    const rawLogs: ethers.providers.Log[] = [];
+    for (const handler of handlers) {
+      try {
+        const logs = await provider.getLogs({
+          address: handler,
+          topics: [DONATION_MADE_EVENT_SIGNATURE],
+          fromBlock,
+          toBlock: effectiveTo,
+        });
+        rawLogs.push(...logs);
+      } catch (error) {
+        throw new BlockchainError(
+          BlockchainErrorCode.NETWORK_ERROR,
+          `Failed to fetch DonationMade logs for network ${networkId} blocks ${fromBlock}-${effectiveTo}: ${
+            error instanceof Error ? error.message : 'Unknown error'
+          }`,
+          { networkId, fromBlock, toBlock: effectiveTo, handler },
+        );
+      }
+    }
+
+    // Decode the DonationMade logs, then enrich each with its block timestamp
+    // and transaction sender. Block/tx lookups are de-duplicated (a batch tx
+    // emits multiple events; many events can share a block) and fetched with
+    // bounded concurrency so a wide range with many events doesn't fan out into
+    // an unbounded burst of serial RPC round trips.
+    const decoded = rawLogs
+      .filter(
+        (log) =>
+          log.topics[0] === DONATION_MADE_EVENT_SIGNATURE &&
+          log.topics.length >= 3,
+      )
+      .map((log) => {
+        const rawTokenAddress = '0x' + log.topics[2].substring(26);
+        const isNativeToken =
+          rawTokenAddress.toLowerCase() === NATIVE_TOKEN_ADDRESS.toLowerCase();
+        return {
+          transactionHash: log.transactionHash,
+          logIndex: log.logIndex,
+          blockNumber: log.blockNumber,
+          to: '0x' + log.topics[1].substring(26),
+          tokenAddress: isNativeToken ? NATIVE_TOKEN_ADDRESS : rawTokenAddress,
+          amount: ethers.BigNumber.from(
+            '0x' + log.data.substring(2, 66),
+          ).toString(),
+          isNativeToken,
+        };
+      });
+
+    const uniqueBlockNumbers = [...new Set(decoded.map((d) => d.blockNumber))];
+    const uniqueTxHashes = [...new Set(decoded.map((d) => d.transactionHash))];
+
+    // Missing block/tx results (RPC hiccup, pruning, reorg) would corrupt the
+    // record (block timestamp -> wrong donation date, empty sender -> dropped
+    // donation), so fail the whole scan instead — the caller retries the range.
+    const [blockEntries, txEntries] = await Promise.all([
+      this.mapWithConcurrency(
+        uniqueBlockNumbers,
+        LOG_ENRICHMENT_CONCURRENCY,
+        async (blockNumber): Promise<[number, number]> => {
+          const block = await provider.getBlock(blockNumber);
+          if (!block) {
+            throw new BlockchainError(
+              BlockchainErrorCode.NETWORK_ERROR,
+              `Block ${blockNumber} was unavailable during log enrichment on network ${networkId}`,
+              { networkId, blockNumber },
+            );
+          }
+          return [blockNumber, block.timestamp];
+        },
+      ),
+      this.mapWithConcurrency(
+        uniqueTxHashes,
+        LOG_ENRICHMENT_CONCURRENCY,
+        async (transactionHash): Promise<[string, string]> => {
+          const tx = await provider.getTransaction(transactionHash);
+          if (!tx) {
+            throw new BlockchainError(
+              BlockchainErrorCode.NETWORK_ERROR,
+              `Transaction ${transactionHash} was unavailable during log enrichment on network ${networkId}`,
+              { networkId, transactionHash },
+            );
+          }
+          return [transactionHash, tx.from];
+        },
+      ),
+    ]);
+
+    const blockTimestamps = new Map<number, number>(blockEntries);
+    const txSenders = new Map<string, string>(txEntries);
+
+    const logs: DonationMadeLog[] = decoded
+      .map((d) => ({
+        transactionHash: d.transactionHash,
+        logIndex: d.logIndex,
+        blockNumber: d.blockNumber,
+        blockTimestamp: blockTimestamps.get(d.blockNumber) as number,
+        from: txSenders.get(d.transactionHash) as string,
+        to: d.to,
+        tokenAddress: d.tokenAddress,
+        amount: d.amount,
+        isNativeToken: d.isNativeToken,
+      }))
+      // Deterministic ordering so the cron processes events chronologically.
+      .sort((a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex);
+
+    return { networkId, fromBlock, toBlock: effectiveTo, latestBlock, logs };
+  }
+
+  /**
+   * Map over items with a bounded number of in-flight async operations, so a
+   * large batch of RPC lookups doesn't burst the provider. Rejects as soon as
+   * any task throws (workers stop pulling new work once the batch settles).
+   */
+  private async mapWithConcurrency<T, R>(
+    items: T[],
+    limit: number,
+    fn: (item: T) => Promise<R>,
+  ): Promise<R[]> {
+    const results: R[] = new Array(items.length);
+    let next = 0;
+    const runWorker = async (): Promise<void> => {
+      while (next < items.length) {
+        const index = next++;
+        results[index] = await fn(items[index]);
+      }
+    };
+    const workerCount = Math.min(Math.max(limit, 1), items.length);
+    await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+    return results;
   }
 
   /**
