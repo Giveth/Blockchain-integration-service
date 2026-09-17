@@ -123,9 +123,8 @@ describe('POST /api/donation-handler-logs (#393 reconciler scan)', () => {
 
   it('surfaces a BlockchainError from the service as a 400', async () => {
     // The global error handler maps BlockchainError -> 400 {success,error,code}.
-    const { BlockchainError, BlockchainErrorCode } = await import(
-      '../../types'
-    );
+    const { BlockchainError, BlockchainErrorCode } =
+      await import('../../types');
     getDonationHandlerLogsStub.rejects(
       new BlockchainError(
         BlockchainErrorCode.UNSUPPORTED_CHAIN,
