@@ -109,6 +109,18 @@ export const NETWORK_CONFIGS: Record<number, NetworkConfig> = {
       decimals: 18,
     },
   },
+  [NetworkId.ROBINHOOD]: {
+    id: NetworkId.ROBINHOOD,
+    name: 'Robinhood Chain',
+    chainType: ChainType.EVM,
+    rpcUrl: process.env.ROBINHOOD_RPC_URL,
+    blockExplorerUrl: 'https://robinhoodchain.blockscout.com',
+    nativeCurrency: {
+      name: 'Ethereum',
+      symbol: 'ETH',
+      decimals: 18,
+    },
+  },
   [NetworkId.SOLANA_MAINNET]: {
     id: NetworkId.SOLANA_MAINNET,
     name: 'Solana Mainnet',
@@ -136,6 +148,21 @@ if (process.env.OPTIMISM_SEPOLIA_RPC_URL) {
     chainType: ChainType.EVM,
     rpcUrl: process.env.OPTIMISM_SEPOLIA_RPC_URL,
     blockExplorerUrl: 'https://sepolia-optimism.etherscan.io',
+    nativeCurrency: {
+      name: 'Ethereum',
+      symbol: 'ETH',
+      decimals: 18,
+    },
+  };
+}
+
+if (process.env.ROBINHOOD_TESTNET_RPC_URL) {
+  NETWORK_CONFIGS[NetworkId.ROBINHOOD_TESTNET] = {
+    id: NetworkId.ROBINHOOD_TESTNET,
+    name: 'Robinhood Chain Testnet',
+    chainType: ChainType.EVM,
+    rpcUrl: process.env.ROBINHOOD_TESTNET_RPC_URL,
+    blockExplorerUrl: 'https://explorer.testnet.chain.robinhood.com',
     nativeCurrency: {
       name: 'Ethereum',
       symbol: 'ETH',
