@@ -31,6 +31,33 @@ describe('Network Configuration', () => {
       expect(NETWORK_CONFIGS[NetworkId.ARBITRUM]).to.exist;
       expect(NETWORK_CONFIGS[NetworkId.BASE]).to.exist;
     });
+
+    it('should contain configuration for Robinhood Chain', () => {
+      const config = NETWORK_CONFIGS[NetworkId.ROBINHOOD];
+      expect(config).to.exist;
+      expect(config.id).to.equal(4663);
+      expect(config.name).to.equal('Robinhood Chain');
+      expect(config.chainType).to.equal(ChainType.EVM);
+      expect(config.nativeCurrency.symbol).to.equal('ETH');
+      expect(config.blockExplorerUrl).to.equal(
+        'https://robinhoodchain.blockscout.com',
+      );
+    });
+
+    it('should register Robinhood Chain testnet only when its RPC URL is set', () => {
+      // Mirrors the OPTIMISM_SEPOLIA conditional block: the testnet joins
+      // NETWORK_CONFIGS only in environments that opt in via env var.
+      const registered = NetworkId.ROBINHOOD_TESTNET in NETWORK_CONFIGS;
+      expect(registered).to.equal(
+        Boolean(process.env.ROBINHOOD_TESTNET_RPC_URL),
+      );
+      if (registered) {
+        const config = NETWORK_CONFIGS[NetworkId.ROBINHOOD_TESTNET];
+        expect(config.id).to.equal(46630);
+        expect(config.chainType).to.equal(ChainType.EVM);
+        expect(config.nativeCurrency.symbol).to.equal('ETH');
+      }
+    });
   });
 
   describe('getNetworkConfig', () => {

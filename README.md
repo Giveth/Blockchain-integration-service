@@ -149,6 +149,7 @@ TRANSACTION_TIME_THRESHOLD=3600
 - Celo (42220)
 - BSC (56)
 - Avalanche (43114)
+- Robinhood Chain (4663)
 
 ### Non-EVM
 - Solana Mainnet (101)

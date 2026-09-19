@@ -17,6 +17,8 @@ export enum NetworkId {
   BASE = 8453,
   BSC = 56,
   AVALANCHE = 43114,
+  ROBINHOOD = 4663,
+  ROBINHOOD_TESTNET = 46630, // Robinhood Chain testnet (staging)
   SOLANA_MAINNET = 101,
 }
 
