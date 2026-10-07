@@ -123,6 +123,27 @@ export const NETWORK_CONFIGS: Record<number, NetworkConfig> = {
   },
 };
 
+/**
+ * Testnets are registered only when their RPC URL is configured. This keeps
+ * them isolated to environments that opt in (e.g. staging sets
+ * OPTIMISM_SEPOLIA_RPC_URL): production never advertises the testnet in
+ * `/chains`, accepts it via `isNetworkSupported`, or verifies txs on it.
+ */
+if (process.env.OPTIMISM_SEPOLIA_RPC_URL) {
+  NETWORK_CONFIGS[NetworkId.OPTIMISM_SEPOLIA] = {
+    id: NetworkId.OPTIMISM_SEPOLIA,
+    name: 'Optimism Sepolia',
+    chainType: ChainType.EVM,
+    rpcUrl: process.env.OPTIMISM_SEPOLIA_RPC_URL,
+    blockExplorerUrl: 'https://sepolia-optimism.etherscan.io',
+    nativeCurrency: {
+      name: 'Ethereum',
+      symbol: 'ETH',
+      decimals: 18,
+    },
+  };
+}
+
 export const getNetworkConfig = (networkId: number): NetworkConfig => {
   const config = NETWORK_CONFIGS[networkId];
   if (!config) {

@@ -62,6 +62,26 @@ const erc721OwnershipSchema = Joi.object({
     .required(),
 });
 
+// Max block span per DonationMade scan request. Kept below common free-tier RPC
+// eth_getLogs limits (dRPC ~10k) so the core reconciler can chunk safely.
+const MAX_DONATION_LOGS_BLOCK_SPAN = 10000;
+
+const donationHandlerLogsSchema = Joi.object({
+  networkId: Joi.number().integer().positive().required(),
+  fromBlock: Joi.number().integer().min(0),
+  // toBlock must be >= fromBlock and within MAX_DONATION_LOGS_BLOCK_SPAN of it.
+  toBlock: Joi.number()
+    .integer()
+    .min(Joi.ref('fromBlock'))
+    .max(
+      Joi.ref('fromBlock', {
+        adjust: (value) => value + MAX_DONATION_LOGS_BLOCK_SPAN - 1,
+      }),
+    ),
+})
+  // fromBlock/toBlock are both-or-neither; omitting both = "latest-only" mode.
+  .and('fromBlock', 'toBlock');
+
 /**
  * Transform internal validation result to external verification result format
  */
@@ -188,6 +208,29 @@ router.post(
           tokenAddress: tokenAddress || null,
           priceUsd,
         },
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+router.post(
+  '/donation-handler-logs',
+  validateRequest(donationHandlerLogsSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { networkId, fromBlock, toBlock } = req.body;
+      const result =
+        await transactionVerificationService.getDonationHandlerLogs(
+          networkId,
+          fromBlock,
+          toBlock,
+        );
+
+      res.json({
+        success: true,
+        data: result,
       });
     } catch (error) {
       next(error);

@@ -10,6 +10,7 @@ export enum NetworkId {
   MAINNET = 1,
   POLYGON = 137,
   OPTIMISM = 10,
+  OPTIMISM_SEPOLIA = 11155420, // Optimism testnet (staging)
   ARBITRUM = 42161,
   GNOSIS = 100,
   CELO = 42220,

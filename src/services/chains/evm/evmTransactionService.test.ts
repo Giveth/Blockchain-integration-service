@@ -5,6 +5,12 @@ import {
   evmTransactionService,
   DonationTransferInfo,
 } from './evmTransactionService';
+import { getDonationHandlerAddresses } from '../../../config/donationHandlers';
+import {
+  BlockchainError,
+  BlockchainErrorCode,
+  NetworkId,
+} from '../../../types';
 
 // Transfer event topic
 const TRANSFER_TOPIC =
@@ -528,7 +534,7 @@ describe('EvmTransactionService', () => {
     const RELAYER_ADDRESS = '0xB42F812A44c22cc6b861478900401ee759EbEAD6';
     const DONOR_ADDRESS = '0x65279542f9312620a67469b042a8bb6851904442';
     const RECIPIENT = '0x4d9339dd97db55e3b9bcbe65de39ff9c04d1c2cd';
-    const DONATION_HANDLER = '0x6e349C56F512cB4250276BF36335c8dd618944A1';
+    const DONATION_HANDLER = '0x4102E15f4621Fc45fCe8E07442A702BD49fcea4b';
     const USDC_ADDRESS = '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359';
     const TX_HASH =
       '0xf2f47c7c977933f08e57c13323b3f53d5ab65e6e132f626b9aba9ae635532f76';
@@ -727,102 +733,334 @@ describe('EvmTransactionService', () => {
     });
   });
 
-  describe('getTransactionInfo (Account Abstraction donation handler)', () => {
-    const ENTRYPOINT_ADDRESS = '0x5ff137d4B0fdCD49dcA30c7CF57E578a026d2789';
-    const SMART_ACCOUNT = '0x501ef174B66883Ba40f92E6Fb24bfb49331D4d4C';
-    const DONOR_ADDRESS = '0x1C9B282ceC2bCc27432f1F06eE2532c88634B63F';
-    const RECIPIENT = '0xA743B5aC96F06da66Ca3921AAD06F2A2e040FB02';
-    const DONATION_HANDLER = '0x7a5D2A00a25b95fd8739bc52Cd79f8F971C37Ca1';
-    const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bDa02913';
-    const TX_HASH =
-      '0x375904913077bd62396d58781d69e51acaaa7c87ad9b5d87fd1630f20e5a113e';
+  describe('getDonationHandlerLogs (#393 reconciler scan)', () => {
+    const DONATION_MADE_SIG = DONATION_MADE_TOPIC;
+    const NATIVE_40 = '0'.repeat(40);
+    const RECIP = 'a'.repeat(40);
+    const ERC20 = 'b'.repeat(40);
 
-    it('should prefer the AA transfer sender over the donation handler log sender', async () => {
-      const amountRaw = ethers.utils.parseUnits('50.01', 6);
-      const donationLog: ethers.providers.Log = {
-        address: DONATION_HANDLER,
-        blockHash:
-          '0xabcd000000000000000000000000000000000000000000000000000000000000',
-        blockNumber: 12345,
-        data: '0x' + amountRaw.toHexString().slice(2).padStart(64, '0'),
-        logIndex: 0,
-        removed: false,
-        topics: [
-          DONATION_MADE_TOPIC,
-          '0x000000000000000000000000' + RECIPIENT.slice(2).toLowerCase(),
-          '0x000000000000000000000000' + USDC_ADDRESS.slice(2).toLowerCase(),
+    // A 40-hex address encodes into an indexed topic as 24 zero-nibbles + addr.
+    const topicOf = (address40: string) => '0x' + '0'.repeat(24) + address40;
+    const amountData = (amount: string) =>
+      '0x' + BigInt(amount).toString(16).padStart(64, '0');
+    const makeLog = (i: {
+      recipient40: string;
+      token40: string;
+      amount: string;
+      blockNumber: number;
+      logIndex: number;
+      transactionHash: string;
+    }): ethers.providers.Log =>
+      ({
+        topics: [DONATION_MADE_SIG, topicOf(i.recipient40), topicOf(i.token40)],
+        data: amountData(i.amount),
+        blockNumber: i.blockNumber,
+        logIndex: i.logIndex,
+        transactionHash: i.transactionHash,
+      }) as unknown as ethers.providers.Log;
+
+    let provider: {
+      getBlockNumber: sinon.SinonStub;
+      getLogs: sinon.SinonStub;
+      getBlock: sinon.SinonStub;
+      getTransaction: sinon.SinonStub;
+    };
+
+    const setProvider = (networkId: number) => {
+      provider = {
+        getBlockNumber: sinon.stub().resolves(2000),
+        getLogs: sinon.stub().resolves([]),
+        getBlock: sinon
+          .stub()
+          .callsFake(async (bn: number) => ({ timestamp: 1_700_000_000 + bn })),
+        getTransaction: sinon
+          .stub()
+          .callsFake(async (hash: string) => ({ from: `0xsender_${hash}` })),
+      };
+      providers.set(networkId, provider);
+    };
+
+    afterEach(() => {
+      providers.delete(NetworkId.MAINNET);
+      providers.delete(NetworkId.POLYGON);
+      sinon.restore();
+    });
+
+    it('decodes native and ERC-20 DonationMade events', async () => {
+      setProvider(NetworkId.MAINNET);
+      provider.getLogs.resolves([
+        makeLog({
+          recipient40: RECIP,
+          token40: NATIVE_40,
+          amount: '1000000000000000000',
+          blockNumber: 120,
+          logIndex: 0,
+          transactionHash: '0xaa',
+        }),
+        makeLog({
+          recipient40: RECIP,
+          token40: ERC20,
+          amount: '2500000',
+          blockNumber: 121,
+          logIndex: 1,
+          transactionHash: '0xbb',
+        }),
+      ]);
+
+      const result = await evmTransactionService.getDonationHandlerLogs(
+        NetworkId.MAINNET,
+        100,
+        200,
+      );
+
+      expect(result.logs).to.have.length(2);
+      const native = result.logs[0];
+      expect(native.isNativeToken).to.be.true;
+      expect(native.tokenAddress).to.equal('0x' + NATIVE_40);
+      expect(native.to).to.equal('0x' + RECIP);
+      expect(native.amount).to.equal('1000000000000000000');
+      expect(native.from).to.equal('0xsender_0xaa');
+      expect(native.blockTimestamp).to.equal(1_700_000_000 + 120);
+      const erc20 = result.logs[1];
+      expect(erc20.isNativeToken).to.be.false;
+      expect(erc20.tokenAddress).to.equal('0x' + ERC20);
+      expect(erc20.amount).to.equal('2500000');
+    });
+
+    it('clamps toBlock to the current head and reports it as latestBlock', async () => {
+      setProvider(NetworkId.MAINNET);
+      provider.getBlockNumber.resolves(150);
+
+      const result = await evmTransactionService.getDonationHandlerLogs(
+        NetworkId.MAINNET,
+        100,
+        99_999,
+      );
+
+      expect(result.latestBlock).to.equal(150);
+      expect(result.toBlock).to.equal(150);
+      expect(provider.getLogs.firstCall.args[0].toBlock).to.equal(150);
+    });
+
+    it('returns nothing (no getLogs) when fromBlock is beyond the head', async () => {
+      setProvider(NetworkId.MAINNET);
+      provider.getBlockNumber.resolves(150);
+
+      const result = await evmTransactionService.getDonationHandlerLogs(
+        NetworkId.MAINNET,
+        200,
+        300,
+      );
+
+      expect(result.logs).to.deep.equal([]);
+      expect(provider.getLogs.called).to.be.false;
+    });
+
+    it('sorts results by block number then log index', async () => {
+      setProvider(NetworkId.MAINNET);
+      provider.getLogs.resolves([
+        makeLog({
+          recipient40: RECIP,
+          token40: NATIVE_40,
+          amount: '1',
+          blockNumber: 130,
+          logIndex: 5,
+          transactionHash: '0xc1',
+        }),
+        makeLog({
+          recipient40: RECIP,
+          token40: NATIVE_40,
+          amount: '1',
+          blockNumber: 120,
+          logIndex: 9,
+          transactionHash: '0xc2',
+        }),
+        makeLog({
+          recipient40: RECIP,
+          token40: NATIVE_40,
+          amount: '1',
+          blockNumber: 120,
+          logIndex: 2,
+          transactionHash: '0xc3',
+        }),
+      ]);
+
+      const result = await evmTransactionService.getDonationHandlerLogs(
+        NetworkId.MAINNET,
+        100,
+        200,
+      );
+
+      expect(result.logs.map((l) => [l.blockNumber, l.logIndex])).to.deep.equal(
+        [
+          [120, 2],
+          [120, 9],
+          [130, 5],
         ],
-        transactionHash: TX_HASH,
-        transactionIndex: 0,
-      };
-      const transferLog: ethers.providers.Log = {
-        address: USDC_ADDRESS,
-        blockHash:
-          '0xabcd000000000000000000000000000000000000000000000000000000000000',
-        blockNumber: 12345,
-        data: '0x' + amountRaw.toHexString().slice(2).padStart(64, '0'),
-        logIndex: 1,
-        removed: false,
-        topics: [
-          TRANSFER_TOPIC,
-          '0x000000000000000000000000' + DONOR_ADDRESS.slice(2).toLowerCase(),
-          '0x000000000000000000000000' + RECIPIENT.slice(2).toLowerCase(),
-        ],
-        transactionHash: TX_HASH,
-        transactionIndex: 0,
-      };
+      );
+    });
 
-      const txResponse = {
-        hash: TX_HASH,
-        from: SMART_ACCOUNT,
-        to: ENTRYPOINT_ADDRESS,
-        value: ethers.BigNumber.from(0),
-        nonce: 10,
-        blockNumber: 12345,
-        gasPrice: ethers.BigNumber.from(1),
-      };
-      const receipt = {
-        status: 1,
-        blockNumber: 12345,
-        gasUsed: ethers.BigNumber.from(21000),
-        logs: [donationLog, transferLog],
-      };
-      const block = { timestamp: 1777305051 };
+    it('de-duplicates block and transaction lookups', async () => {
+      setProvider(NetworkId.MAINNET);
+      // Two events sharing a block and a transaction.
+      provider.getLogs.resolves([
+        makeLog({
+          recipient40: RECIP,
+          token40: NATIVE_40,
+          amount: '1',
+          blockNumber: 120,
+          logIndex: 0,
+          transactionHash: '0xsame',
+        }),
+        makeLog({
+          recipient40: RECIP,
+          token40: ERC20,
+          amount: '2',
+          blockNumber: 120,
+          logIndex: 1,
+          transactionHash: '0xsame',
+        }),
+      ]);
 
-      const fakeProvider = {
-        getTransaction: sinon.stub().resolves(txResponse),
-        getTransactionReceipt: sinon.stub().resolves(receipt),
-        getBlock: sinon.stub().resolves(block),
-      };
+      await evmTransactionService.getDonationHandlerLogs(
+        NetworkId.MAINNET,
+        100,
+        200,
+      );
 
-      const getTokenDecimalsStub = sinon
-        .stub(evmTransactionService, 'getTokenDecimals')
-        .resolves(6);
+      expect(provider.getBlock.callCount).to.equal(1);
+      expect(provider.getTransaction.callCount).to.equal(1);
+    });
 
-      providers.set(8453, fakeProvider);
+    it('scans every handler address of a multi-handler network and merges', async () => {
+      setProvider(NetworkId.POLYGON);
+      const handlers = getDonationHandlerAddresses(NetworkId.POLYGON);
+      expect(handlers.length).to.be.greaterThan(1);
+      provider.getLogs
+        .onCall(0)
+        .resolves([
+          makeLog({
+            recipient40: RECIP,
+            token40: NATIVE_40,
+            amount: '1',
+            blockNumber: 120,
+            logIndex: 0,
+            transactionHash: '0xh1',
+          }),
+        ])
+        .onCall(1)
+        .resolves([
+          makeLog({
+            recipient40: RECIP,
+            token40: ERC20,
+            amount: '2',
+            blockNumber: 121,
+            logIndex: 0,
+            transactionHash: '0xh2',
+          }),
+        ]);
 
+      const result = await evmTransactionService.getDonationHandlerLogs(
+        NetworkId.POLYGON,
+        100,
+        200,
+      );
+
+      expect(provider.getLogs.callCount).to.equal(handlers.length);
+      expect(result.logs.map((l) => l.transactionHash)).to.deep.equal([
+        '0xh1',
+        '0xh2',
+      ]);
+    });
+
+    it('throws NETWORK_ERROR when a block is unavailable during enrichment', async () => {
+      setProvider(NetworkId.MAINNET);
+      provider.getLogs.resolves([
+        makeLog({
+          recipient40: RECIP,
+          token40: NATIVE_40,
+          amount: '1',
+          blockNumber: 120,
+          logIndex: 0,
+          transactionHash: '0xaa',
+        }),
+      ]);
+      provider.getBlock.resolves(null);
+
+      let error: unknown;
       try {
-        const result = await evmTransactionService.getTransactionInfo({
-          txHash: TX_HASH,
-          networkId: 8453,
-          symbol: 'USDC',
-          fromAddress: DONOR_ADDRESS,
-          toAddress: RECIPIENT,
-          amount: 50.01,
-          timestamp: 1777305051,
-          tokenAddress: USDC_ADDRESS,
-        });
-
-        expect(result.from.toLowerCase()).to.equal(DONOR_ADDRESS.toLowerCase());
-        expect(result.from.toLowerCase()).to.not.equal(
-          SMART_ACCOUNT.toLowerCase(),
+        await evmTransactionService.getDonationHandlerLogs(
+          NetworkId.MAINNET,
+          100,
+          200,
         );
-        expect(result.to.toLowerCase()).to.equal(RECIPIENT.toLowerCase());
-        expect(result.amount).to.equal(50.01);
-      } finally {
-        getTokenDecimalsStub.restore();
-        providers.delete(8453);
+      } catch (e) {
+        error = e;
       }
+      expect(error).to.be.instanceOf(BlockchainError);
+      expect((error as BlockchainError).code).to.equal(
+        BlockchainErrorCode.NETWORK_ERROR,
+      );
+    });
+
+    it('throws NETWORK_ERROR when a transaction is unavailable during enrichment', async () => {
+      setProvider(NetworkId.MAINNET);
+      provider.getLogs.resolves([
+        makeLog({
+          recipient40: RECIP,
+          token40: NATIVE_40,
+          amount: '1',
+          blockNumber: 120,
+          logIndex: 0,
+          transactionHash: '0xaa',
+        }),
+      ]);
+      provider.getTransaction.resolves(null);
+
+      let error: unknown;
+      try {
+        await evmTransactionService.getDonationHandlerLogs(
+          NetworkId.MAINNET,
+          100,
+          200,
+        );
+      } catch (e) {
+        error = e;
+      }
+      expect(error).to.be.instanceOf(BlockchainError);
+      expect((error as BlockchainError).code).to.equal(
+        BlockchainErrorCode.NETWORK_ERROR,
+      );
+    });
+
+    it('rejects a non-EVM network with UNSUPPORTED_CHAIN', async () => {
+      let error: unknown;
+      try {
+        await evmTransactionService.getDonationHandlerLogs(
+          NetworkId.SOLANA_MAINNET,
+          1,
+          2,
+        );
+      } catch (e) {
+        error = e;
+      }
+      expect(error).to.be.instanceOf(BlockchainError);
+      expect((error as BlockchainError).code).to.equal(
+        BlockchainErrorCode.UNSUPPORTED_CHAIN,
+      );
+    });
+
+    it('returns the head with no logs in latest-only mode (no range)', async () => {
+      setProvider(NetworkId.MAINNET);
+      provider.getBlockNumber.resolves(1234);
+
+      const result = await evmTransactionService.getDonationHandlerLogs(
+        NetworkId.MAINNET,
+      );
+
+      expect(result.latestBlock).to.equal(1234);
+      expect(result.logs).to.deep.equal([]);
+      expect(provider.getLogs.called).to.be.false;
     });
   });
 });
