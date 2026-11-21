@@ -45,6 +45,12 @@ const ERC4337_ENTRYPOINT_ADDRESSES = new Set<string>([
   '0x0000000071727de22e5e9d8baf0edac6f37da032',
 ]);
 
+// EntryPoint event emitted after each UserOperation executes (same in v0.6 and
+// v0.7). topic[2] is the UserOperation sender (the smart account).
+// keccak256("UserOperationEvent(bytes32,address,address,uint256,bool,uint256,uint256)")
+const USER_OPERATION_EVENT_SIGNATURE =
+  '0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f';
+
 // Minimal ERC-20 ABI for symbol() function
 const ERC20_ABI = [
   'function symbol() view returns (string)',
@@ -66,6 +72,8 @@ export interface DonationTransferInfo {
   amount: bigint;
   tokenAddress: string;
   isNativeToken?: boolean;
+  // Receipt log index of the event this transfer was decoded from, when known.
+  logIndex?: number;
 }
 
 // A single decoded DonationMade event, enriched with the transaction sender and
@@ -554,7 +562,11 @@ export class EvmTransactionService implements IChainHandler {
     if (expectsNativeToken) {
       const nativeDecimals =
         getNetworkConfig(networkId).nativeCurrency.decimals;
-      const allDonations = this.parseDonationMadeEvents(receipt.logs, tx.from);
+      const allDonations = this.parseDonationMadeEvents(
+        receipt.logs,
+        tx.from,
+        networkId,
+      );
       const nativeDonations = allDonations.filter(
         (donation) => donation.isNativeToken,
       );
@@ -586,9 +598,25 @@ export class EvmTransactionService implements IChainHandler {
             return bScore - aScore;
           })[0];
 
+        // Without a trace (RPC has no debug/trace API), attribute the event to
+        // the UserOperation that emitted it. Never fall back to the caller's
+        // claimed address: that would make the sender check compare the
+        // claim with itself and let anyone claim this donation.
         const inferredFrom = senderToDonationHandler
           ? senderToDonationHandler.from
-          : normalizeAddress(input.fromAddress);
+          : this.findUserOperationSenderForLog(
+              receipt.logs,
+              donationTransfer.logIndex,
+            );
+
+        if (!inferredFrom) {
+          logger.warn(
+            'Could not attribute AA DonationMade event to a sender; rejecting',
+            { txHash: tx.hash, networkId, toAddress: input.toAddress },
+          );
+          return null;
+        }
+
         const nativeSymbol = getNetworkConfig(networkId).nativeCurrency.symbol;
 
         return {
@@ -754,6 +782,40 @@ export class EvmTransactionService implements IChainHandler {
     return logs.some((log) => isDonationHandlerAddress(networkId, log.address));
   }
 
+  /**
+   * Find the smart account whose UserOperation emitted the log at `logIndex`.
+   *
+   * The EntryPoint runs a bundle's UserOperations one after another and emits
+   * `UserOperationEvent` right after each one finishes, so the logs an
+   * operation produced sit just before its own `UserOperationEvent`. The
+   * first `UserOperationEvent` (emitted by a known EntryPoint) after
+   * `logIndex` therefore names the sender that produced that log.
+   */
+  private findUserOperationSenderForLog(
+    logs: ethers.providers.Log[],
+    logIndex: number | undefined,
+  ): string | null {
+    if (logIndex === undefined) {
+      return null;
+    }
+
+    const userOperationEvent = logs
+      .filter(
+        (log) =>
+          log.topics[0] === USER_OPERATION_EVENT_SIGNATURE &&
+          log.topics.length >= 3 &&
+          ERC4337_ENTRYPOINT_ADDRESSES.has(normalizeAddress(log.address)) &&
+          log.logIndex > logIndex,
+      )
+      .sort((a, b) => a.logIndex - b.logIndex)[0];
+
+    if (!userOperationEvent) {
+      return null;
+    }
+
+    return normalizeAddress('0x' + userOperationEvent.topics[2].substring(26));
+  }
+
   private getDonationSenderAddress(
     input: TransactionDetailInput,
     tx: ethers.providers.TransactionResponse,
@@ -823,10 +885,16 @@ export class EvmTransactionService implements IChainHandler {
    * Parse DonationMade events from transaction logs
    * Used for both ERC-20 and native token donations through donation handler
    * Event: DonationMade(address indexed recipientAddress, uint256 amount, address indexed tokenAddress, bytes data)
+   *
+   * Only events emitted by a known DonationHandler of `networkId` are returned.
+   * The event signature alone says nothing about who emitted it: any contract
+   * can emit an identical `DonationMade` log claiming an arbitrary recipient
+   * and amount, so trusting it would let a donor verify money they never sent.
    */
   private parseDonationMadeEvents(
     logs: ethers.providers.Log[],
     senderAddress: string,
+    networkId: number,
   ): DonationTransferInfo[] {
     const donations: DonationTransferInfo[] = [];
 
@@ -836,6 +904,22 @@ export class EvmTransactionService implements IChainHandler {
           log.topics[0] === DONATION_MADE_EVENT_SIGNATURE &&
           log.topics.length >= 3
         ) {
+          if (!isDonationHandlerAddress(networkId, log.address)) {
+            // Error level on purpose: a non-handler DonationMade log in a
+            // donation transaction is the footprint of a forged-donation
+            // attempt, and should be visible in the logs.
+            logger.error(
+              'Ignoring DonationMade event emitted by a non-handler contract',
+              {
+                networkId,
+                txHash: log.transactionHash,
+                emitter: log.address,
+                logIndex: log.logIndex,
+              },
+            );
+            continue;
+          }
+
           // Decode DonationMade event
           // topic[1] = recipientAddress (indexed)
           // topic[2] = tokenAddress (indexed)
@@ -858,6 +942,7 @@ export class EvmTransactionService implements IChainHandler {
             amount,
             tokenAddress: isNativeToken ? NATIVE_TOKEN_ADDRESS : tokenAddress,
             isNativeToken,
+            logIndex: log.logIndex,
           });
         }
       } catch (error) {
@@ -1295,6 +1380,7 @@ export class EvmTransactionService implements IChainHandler {
     const allDonations = this.parseDonationMadeEvents(
       receipt.logs,
       donationSenderAddress,
+      networkId,
     );
 
     logger.debug('Parsed DonationMade events from donation handler', {

@@ -733,6 +733,323 @@ describe('EvmTransactionService', () => {
     });
   });
 
+  describe('getTransactionInfo (forged DonationMade events)', () => {
+    const USER_OPERATION_EVENT_TOPIC = ethers.utils.id(
+      'UserOperationEvent(bytes32,address,address,uint256,bool,uint256,uint256)',
+    );
+    const ENTRYPOINT_ADDRESS = '0x5ff137d4B0fdCD49dcA30c7CF57E578a026d2789';
+    const GNOSIS_HANDLER = '0x97b2cb568e0880B99Cd16EFc6edFF5272Aa02676';
+    const POLYGON_HANDLER = '0x4102E15f4621Fc45fCe8E07442A702BD49fcea4b';
+    const BASE_HANDLER = '0x7a5D2A00a25b95fd8739bc52Cd79f8F971C37Ca1';
+    const USDC_POLYGON = '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359';
+    const ATTACKER = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const ATTACKER_CONTRACT = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const PROJECT_RECIPIENT = '0xcccccccccccccccccccccccccccccccccccccccc';
+    const SMART_ACCOUNT = '0xdddddddddddddddddddddddddddddddddddddddd';
+    const OTHER_SMART_ACCOUNT = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+    const NATIVE_40 = '0'.repeat(40);
+    const TX_HASH =
+      '0x1234567890123456789012345678901234567890123456789012345678901234';
+
+    const topicOf = (address: string) =>
+      '0x000000000000000000000000' + address.replace(/^0x/, '').toLowerCase();
+
+    const donationMadeLog = (params: {
+      emitter: string;
+      recipient: string;
+      token: string;
+      amountRaw: ethers.BigNumber;
+      logIndex: number;
+    }): ethers.providers.Log => ({
+      address: params.emitter,
+      blockHash:
+        '0xabcd000000000000000000000000000000000000000000000000000000000000',
+      blockNumber: 12345,
+      data: '0x' + params.amountRaw.toHexString().slice(2).padStart(64, '0'),
+      logIndex: params.logIndex,
+      removed: false,
+      topics: [
+        DONATION_MADE_TOPIC,
+        topicOf(params.recipient),
+        topicOf(params.token),
+      ],
+      transactionHash: TX_HASH,
+      transactionIndex: 0,
+    });
+
+    const userOperationEventLog = (
+      sender: string,
+      logIndex: number,
+      emitter: string = ENTRYPOINT_ADDRESS,
+    ): ethers.providers.Log => ({
+      address: emitter,
+      blockHash:
+        '0xabcd000000000000000000000000000000000000000000000000000000000000',
+      blockNumber: 12345,
+      data: '0x' + '0'.repeat(64 * 4),
+      logIndex,
+      removed: false,
+      topics: [
+        USER_OPERATION_EVENT_TOPIC,
+        '0x' + '1'.repeat(64),
+        topicOf(sender),
+        topicOf(NATIVE_40),
+      ],
+      transactionHash: TX_HASH,
+      transactionIndex: 0,
+    });
+
+    const installProvider = (
+      networkId: number,
+      tx: { from: string; to: string },
+      logs: ethers.providers.Log[],
+    ) => {
+      providers.set(networkId, {
+        getTransaction: sinon.stub().resolves({
+          hash: TX_HASH,
+          from: tx.from,
+          to: tx.to,
+          value: ethers.BigNumber.from(0),
+          nonce: 1,
+          blockNumber: 12345,
+          gasPrice: ethers.BigNumber.from(1),
+        }),
+        getTransactionReceipt: sinon.stub().resolves({
+          status: 1,
+          blockNumber: 12345,
+          gasUsed: ethers.BigNumber.from(21000),
+          logs,
+        }),
+        getBlock: sinon.stub().resolves({ timestamp: 1600000000 }),
+        // No debug_traceTransaction / trace_transaction support.
+        send: sinon.stub().rejects(new Error('method not supported')),
+      });
+    };
+
+    const expectToAddressMismatch = async (promise: Promise<unknown>) => {
+      try {
+        await promise;
+        expect.fail('expected verification to be rejected');
+      } catch (error) {
+        expect(error).to.be.instanceOf(BlockchainError);
+        expect((error as BlockchainError).code).to.equal(
+          BlockchainErrorCode.TO_ADDRESS_MISMATCH,
+        );
+      }
+    };
+
+    afterEach(() => {
+      sinon.restore();
+      providers.delete(100);
+      providers.delete(137);
+      providers.delete(8453);
+    });
+
+    it('ignores a native DonationMade event emitted by a non-handler contract', async () => {
+      // A dust donation through the real handler to the attacker's contract,
+      // plus a forged event from that contract claiming 1,000 xDAI to a project.
+      installProvider(100, { from: ATTACKER, to: ATTACKER_CONTRACT }, [
+        donationMadeLog({
+          emitter: GNOSIS_HANDLER,
+          recipient: ATTACKER_CONTRACT,
+          token: NATIVE_40,
+          amountRaw: ethers.utils.parseUnits('0.0001', 18),
+          logIndex: 0,
+        }),
+        donationMadeLog({
+          emitter: ATTACKER_CONTRACT,
+          recipient: PROJECT_RECIPIENT,
+          token: NATIVE_40,
+          amountRaw: ethers.utils.parseUnits('1000', 18),
+          logIndex: 1,
+        }),
+      ]);
+
+      await expectToAddressMismatch(
+        evmTransactionService.getTransactionInfo({
+          txHash: TX_HASH,
+          networkId: 100,
+          symbol: 'XDAI',
+          fromAddress: ATTACKER,
+          toAddress: PROJECT_RECIPIENT,
+          amount: 1000,
+          timestamp: 1600000000,
+        }),
+      );
+    });
+
+    it('ignores an ERC-20 DonationMade event emitted by a non-handler contract', async () => {
+      sinon.stub(evmTransactionService, 'getTokenDecimals').resolves(6);
+      sinon.stub(evmTransactionService, 'getTokenSymbol').resolves('USDC');
+      installProvider(137, { from: ATTACKER, to: ATTACKER_CONTRACT }, [
+        donationMadeLog({
+          emitter: POLYGON_HANDLER,
+          recipient: ATTACKER_CONTRACT,
+          token: NATIVE_40,
+          amountRaw: ethers.utils.parseUnits('0.0001', 18),
+          logIndex: 0,
+        }),
+        donationMadeLog({
+          emitter: ATTACKER_CONTRACT,
+          recipient: PROJECT_RECIPIENT,
+          token: USDC_POLYGON,
+          amountRaw: ethers.utils.parseUnits('25000', 6),
+          logIndex: 1,
+        }),
+      ]);
+
+      await expectToAddressMismatch(
+        evmTransactionService.getTransactionInfo({
+          txHash: TX_HASH,
+          networkId: 137,
+          symbol: 'USDC',
+          fromAddress: ATTACKER,
+          toAddress: PROJECT_RECIPIENT,
+          amount: 25000,
+          timestamp: 1600000000,
+          tokenAddress: USDC_POLYGON,
+        }),
+      );
+    });
+
+    it('reports the handler amount, not a larger forged amount, for the same recipient', async () => {
+      installProvider(100, { from: ATTACKER, to: ATTACKER_CONTRACT }, [
+        donationMadeLog({
+          emitter: ATTACKER_CONTRACT,
+          recipient: PROJECT_RECIPIENT,
+          token: NATIVE_40,
+          amountRaw: ethers.utils.parseUnits('1000', 18),
+          logIndex: 0,
+        }),
+        donationMadeLog({
+          emitter: GNOSIS_HANDLER,
+          recipient: PROJECT_RECIPIENT,
+          token: NATIVE_40,
+          amountRaw: ethers.utils.parseUnits('1', 18),
+          logIndex: 1,
+        }),
+      ]);
+
+      const result = await evmTransactionService.getTransactionInfo({
+        txHash: TX_HASH,
+        networkId: 100,
+        symbol: 'XDAI',
+        fromAddress: ATTACKER,
+        toAddress: PROJECT_RECIPIENT,
+        amount: 1000,
+        timestamp: 1600000000,
+      });
+
+      expect(result.amount).to.equal(1);
+    });
+
+    it('ignores a forged DonationMade event in an EntryPoint transaction', async () => {
+      // No handler involved at all: the attacker's smart account just emits
+      // the event during its own UserOperation.
+      installProvider(8453, { from: ATTACKER, to: ENTRYPOINT_ADDRESS }, [
+        donationMadeLog({
+          emitter: SMART_ACCOUNT,
+          recipient: PROJECT_RECIPIENT,
+          token: NATIVE_40,
+          amountRaw: ethers.utils.parseUnits('500', 18),
+          logIndex: 0,
+        }),
+        userOperationEventLog(SMART_ACCOUNT, 1),
+      ]);
+
+      await expectToAddressMismatch(
+        evmTransactionService.getTransactionInfo({
+          txHash: TX_HASH,
+          networkId: 8453,
+          symbol: 'ETH',
+          fromAddress: SMART_ACCOUNT,
+          toAddress: PROJECT_RECIPIENT,
+          amount: 500,
+          timestamp: 1600000000,
+        }),
+      );
+    });
+
+    it('attributes an AA native donation to its UserOperation sender when traces are unavailable', async () => {
+      // Two operations in one bundle; the donation belongs to the second one.
+      installProvider(8453, { from: ATTACKER, to: ENTRYPOINT_ADDRESS }, [
+        userOperationEventLog(OTHER_SMART_ACCOUNT, 0),
+        donationMadeLog({
+          emitter: BASE_HANDLER,
+          recipient: PROJECT_RECIPIENT,
+          token: NATIVE_40,
+          amountRaw: ethers.utils.parseUnits('2', 18),
+          logIndex: 1,
+        }),
+        userOperationEventLog(SMART_ACCOUNT, 2),
+      ]);
+
+      const result = await evmTransactionService.getTransactionInfo({
+        txHash: TX_HASH,
+        networkId: 8453,
+        symbol: 'ETH',
+        // The claimed sender must not be echoed back as the verified sender.
+        fromAddress: OTHER_SMART_ACCOUNT,
+        toAddress: PROJECT_RECIPIENT,
+        amount: 2,
+        timestamp: 1600000000,
+      });
+
+      expect(result.from.toLowerCase()).to.equal(SMART_ACCOUNT);
+      expect(result.amount).to.equal(2);
+    });
+
+    it('ignores UserOperationEvent logs not emitted by a known EntryPoint', async () => {
+      installProvider(8453, { from: ATTACKER, to: ENTRYPOINT_ADDRESS }, [
+        donationMadeLog({
+          emitter: BASE_HANDLER,
+          recipient: PROJECT_RECIPIENT,
+          token: NATIVE_40,
+          amountRaw: ethers.utils.parseUnits('2', 18),
+          logIndex: 0,
+        }),
+        userOperationEventLog(ATTACKER, 1, ATTACKER_CONTRACT),
+        userOperationEventLog(SMART_ACCOUNT, 2),
+      ]);
+
+      const result = await evmTransactionService.getTransactionInfo({
+        txHash: TX_HASH,
+        networkId: 8453,
+        symbol: 'ETH',
+        fromAddress: ATTACKER,
+        toAddress: PROJECT_RECIPIENT,
+        amount: 2,
+        timestamp: 1600000000,
+      });
+
+      expect(result.from.toLowerCase()).to.equal(SMART_ACCOUNT);
+    });
+
+    it('rejects an AA native donation whose sender cannot be determined', async () => {
+      installProvider(8453, { from: ATTACKER, to: ENTRYPOINT_ADDRESS }, [
+        donationMadeLog({
+          emitter: BASE_HANDLER,
+          recipient: PROJECT_RECIPIENT,
+          token: NATIVE_40,
+          amountRaw: ethers.utils.parseUnits('2', 18),
+          logIndex: 0,
+        }),
+      ]);
+
+      await expectToAddressMismatch(
+        evmTransactionService.getTransactionInfo({
+          txHash: TX_HASH,
+          networkId: 8453,
+          symbol: 'ETH',
+          fromAddress: ATTACKER,
+          toAddress: PROJECT_RECIPIENT,
+          amount: 2,
+          timestamp: 1600000000,
+        }),
+      );
+    });
+  });
+
   describe('getDonationHandlerLogs (#393 reconciler scan)', () => {
     const DONATION_MADE_SIG = DONATION_MADE_TOPIC;
     const NATIVE_40 = '0'.repeat(40);
