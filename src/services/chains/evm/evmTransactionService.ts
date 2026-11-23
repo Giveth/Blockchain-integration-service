@@ -39,6 +39,9 @@ const NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000';
 // an unbounded number of in-flight requests.
 const LOG_ENRICHMENT_CONCURRENCY = 8;
 
+// Code of an EIP-7702-delegated EOA: 0xef0100 || delegate address.
+const EIP7702_DELEGATION_PREFIX = '0xef0100';
+
 // EIP-4337 EntryPoint contracts (v0.6 + v0.7)
 const ERC4337_ENTRYPOINT_ADDRESSES = new Set<string>([
   '0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789',
@@ -64,6 +67,23 @@ interface InternalValueTransfer {
   from: string;
   to: string;
   value: bigint;
+}
+
+// One value-carrying call into a DonationHandler, with the value the handler
+// paid out from inside that same call (directly, or through a proxy's
+// delegatecall). Lets a native DonationMade be tied to the wallet that funded
+// it, rather than to anyone who sent value somewhere in the transaction.
+interface HandlerValueCall {
+  from: string;
+  value: bigint;
+  payouts: Array<{ to: string; value: bigint }>;
+}
+
+interface RawTraceCall {
+  from: string;
+  to: string;
+  value: bigint;
+  callType: string;
 }
 
 export interface DonationTransferInfo {
@@ -405,6 +425,384 @@ export class EvmTransactionService implements IChainHandler {
       );
       return [];
     }
+  }
+
+  private toRawTraceCall(node: unknown): RawTraceCall | null {
+    if (!node || typeof node !== 'object') {
+      return null;
+    }
+    const typed = node as {
+      from?: unknown;
+      to?: unknown;
+      value?: unknown;
+      type?: unknown;
+      callType?: unknown;
+    };
+    const kind = typed.callType ?? typed.type;
+    return {
+      from: typeof typed.from === 'string' ? normalizeAddress(typed.from) : '',
+      to: typeof typed.to === 'string' ? normalizeAddress(typed.to) : '',
+      value: this.parseTraceValueToBigInt(typed.value),
+      callType: typeof kind === 'string' ? kind.toLowerCase() : 'call',
+    };
+  }
+
+  private isRevertedTraceFrame(frame: unknown): boolean {
+    const error = (frame as { error?: unknown } | null)?.error;
+    return error !== undefined && error !== null && error !== '';
+  }
+
+  /**
+   * Value-carrying calls into a DonationHandler, each with the payouts the
+   * handler made inside that call. Returns null when no tracing RPC is
+   * available (or the trace has no call nesting), so callers can tell
+   * "unknown" apart from "nothing matched".
+   */
+  private async getHandlerValueCalls(
+    networkId: number,
+    txHash: string,
+  ): Promise<HandlerValueCall[] | null> {
+    const provider = this.getProvider(networkId);
+    const handlerAddresses = new Set(
+      getDonationHandlerAddresses(networkId).map((address) =>
+        normalizeAddress(address),
+      ),
+    );
+
+    let debugTraceTransient = false;
+    try {
+      const root = await provider.send('debug_traceTransaction', [
+        txHash,
+        { tracer: 'callTracer' },
+      ]);
+      const calls: HandlerValueCall[] = [];
+      // A reverted frame (e.g. one call of a try/catch batch) moved no value,
+      // nor did anything under it, so it and its whole subtree are skipped.
+      const childrenOf = (node: unknown): unknown[] => {
+        const children = (node as { calls?: unknown })?.calls;
+        return Array.isArray(children)
+          ? children.filter((child) => !this.isRevertedTraceFrame(child))
+          : [];
+      };
+      // The handler pays out in its own frame, or (behind a proxy) inside a
+      // delegatecall frame that still runs as the handler address.
+      const collectPayouts = (
+        node: unknown,
+        handler: string,
+        payouts: HandlerValueCall['payouts'],
+      ): void => {
+        for (const child of childrenOf(node)) {
+          const call = this.toRawTraceCall(child);
+          if (!call) {
+            continue;
+          }
+          if (
+            call.callType === 'delegatecall' ||
+            call.callType === 'callcode'
+          ) {
+            collectPayouts(child, handler, payouts);
+          } else if (call.from === handler && call.value > BigInt(0)) {
+            payouts.push({ to: call.to, value: call.value });
+          }
+        }
+      };
+      const walk = (node: unknown): void => {
+        const call = this.toRawTraceCall(node);
+        if (!call) {
+          return;
+        }
+        if (
+          handlerAddresses.has(call.to) &&
+          call.callType === 'call' &&
+          call.value > BigInt(0)
+        ) {
+          const payouts: HandlerValueCall['payouts'] = [];
+          collectPayouts(node, call.to, payouts);
+          calls.push({ from: call.from, value: call.value, payouts });
+        }
+        for (const child of childrenOf(node)) {
+          walk(child);
+        }
+      };
+      if (!this.isRevertedTraceFrame(root)) {
+        walk(root);
+      }
+      return calls;
+    } catch (debugTraceError) {
+      debugTraceTransient = this.isTransientRpcError(debugTraceError);
+      logger.debug(
+        'debug_traceTransaction is unavailable, trying trace_transaction',
+        {
+          txHash,
+          networkId,
+          error:
+            debugTraceError instanceof Error
+              ? debugTraceError.message
+              : 'Unknown error',
+        },
+      );
+    }
+
+    try {
+      const result = await provider.send('trace_transaction', [txHash]);
+      const allEntries = (Array.isArray(result) ? result : [])
+        .map((entry: unknown) => {
+          const typed = entry as { action?: unknown; traceAddress?: unknown };
+          const call = this.toRawTraceCall(typed?.action);
+          const traceAddress = typed?.traceAddress;
+          if (!call || !Array.isArray(traceAddress)) {
+            return null;
+          }
+          return {
+            call,
+            path: traceAddress.map(Number),
+            reverted: this.isRevertedTraceFrame(entry),
+          };
+        })
+        .filter(
+          (
+            entry,
+          ): entry is {
+            call: RawTraceCall;
+            path: number[];
+            reverted: boolean;
+          } => entry !== null,
+        );
+      if (allEntries.length === 0) {
+        if (debugTraceTransient) {
+          throw this.traceUnavailableError(networkId, txHash);
+        }
+        return null;
+      }
+      // Drop reverted entries and everything under them (their traceAddress
+      // starts with a reverted entry's traceAddress).
+      const revertedPaths = allEntries
+        .filter((entry) => entry.reverted)
+        .map((entry) => entry.path);
+      const entries = allEntries.filter(
+        (entry) =>
+          !revertedPaths.some(
+            (reverted) =>
+              reverted.length <= entry.path.length &&
+              reverted.every((step, i) => entry.path[i] === step),
+          ),
+      );
+
+      const byPath = new Map(entries.map((e) => [e.path.join(','), e.call]));
+      const calls: HandlerValueCall[] = [];
+      for (const entry of entries) {
+        const { call, path } = entry;
+        if (
+          !handlerAddresses.has(call.to) ||
+          call.callType !== 'call' ||
+          call.value <= BigInt(0)
+        ) {
+          continue;
+        }
+        const payouts = entries
+          .filter((candidate) => {
+            const sub = candidate.path;
+            if (
+              sub.length <= path.length ||
+              path.some((step, i) => sub[i] !== step) ||
+              candidate.call.from !== call.to ||
+              candidate.call.callType !== 'call' ||
+              candidate.call.value <= BigInt(0)
+            ) {
+              return false;
+            }
+            // Every frame between the handler call and the payout must be a
+            // delegatecall, i.e. still running as the handler.
+            for (let depth = path.length + 1; depth < sub.length; depth++) {
+              const between = byPath.get(sub.slice(0, depth).join(','));
+              if (between?.callType !== 'delegatecall') {
+                return false;
+              }
+            }
+            return true;
+          })
+          .map((candidate) => ({
+            to: candidate.call.to,
+            value: candidate.call.value,
+          }));
+        calls.push({ from: call.from, value: call.value, payouts });
+      }
+      return calls;
+    } catch (traceError) {
+      if (traceError instanceof BlockchainError) {
+        throw traceError;
+      }
+      // A transient failure (timeout, 429, 5xx) on either tracer must not be
+      // read as "no tracer": verification would settle the donation on
+      // tx.from. Throw a retryable NETWORK_ERROR instead (core retries with
+      // its own limit). Anything we can't tell apart counts as unsupported.
+      const transient =
+        debugTraceTransient || this.isTransientRpcError(traceError);
+      logger.warn('Failed to fetch handler calls from tracing RPCs', {
+        txHash,
+        networkId,
+        transient,
+        error:
+          traceError instanceof Error ? traceError.message : 'Unknown error',
+      });
+      if (transient) {
+        throw this.traceUnavailableError(networkId, txHash);
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Reconciler variant: a trace failure never fails the scan. A failure that
+   * repeats on every retry (tracer timeout on a big tx, response too large)
+   * would otherwise stall the range forever, so keep tx.from instead.
+   */
+  private async getHandlerValueCallsForScan(
+    networkId: number,
+    txHash: string,
+  ): Promise<HandlerValueCall[] | null> {
+    try {
+      return await this.getHandlerValueCalls(networkId, txHash);
+    } catch (error) {
+      logger.warn('Tracing failed during log enrichment; keeping tx.from', {
+        networkId,
+        txHash,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      return null;
+    }
+  }
+
+  private traceUnavailableError(
+    networkId: number,
+    txHash: string,
+  ): BlockchainError {
+    return new BlockchainError(
+      BlockchainErrorCode.NETWORK_ERROR,
+      `Tracing RPC temporarily failed for ${txHash} on network ${networkId}`,
+      { networkId, txHash },
+    );
+  }
+
+  /**
+   * Whether an RPC failure is worth retrying (timeout, rate limit, 5xx,
+   * dropped connection), as opposed to the method or the historical state
+   * being unavailable on this node. Unsupported markers win, and anything
+   * unrecognised counts as not transient.
+   */
+  private isTransientRpcError(error: unknown): boolean {
+    // Free text (message, reason, body) is only searched for markers. Status
+    // codes come from structured fields alone: the text embeds the request
+    // body, whose JSON-RPC "id" (or the tx hash) must not read as a 5xx.
+    const texts: string[] = [];
+    const statuses: number[] = [];
+    const rpcCodes: number[] = [];
+    const visit = (value: unknown, depth: number): void => {
+      if (!value || typeof value !== 'object' || depth > 3) {
+        return;
+      }
+      const typed = value as Record<string, unknown>;
+      for (const key of ['message', 'reason', 'body']) {
+        if (typeof typed[key] === 'string') {
+          texts.push(typed[key] as string);
+        }
+      }
+      if (typeof typed.code === 'string') {
+        texts.push(typed.code);
+      } else if (typeof typed.code === 'number') {
+        rpcCodes.push(typed.code);
+      }
+      if (typeof typed.status === 'number') {
+        statuses.push(typed.status);
+      }
+      // ethers keeps the JSON-RPC error payload as a string `body`.
+      if (typeof typed.body === 'string') {
+        try {
+          const code = (
+            JSON.parse(typed.body) as { error?: { code?: unknown } }
+          )?.error?.code;
+          if (typeof code === 'number') {
+            rpcCodes.push(code);
+          }
+        } catch {
+          // Not JSON; the text markers still apply.
+        }
+      }
+      visit(typed.error, depth + 1);
+      visit(typed.serverError, depth + 1);
+    };
+    if (error instanceof Error || (error && typeof error === 'object')) {
+      visit(error, 0);
+    } else if (error !== undefined && error !== null) {
+      texts.push(String(error));
+    }
+    const text = texts.join(' ').toLowerCase();
+
+    // Checked first, and wins: errors that fail the same way on every retry.
+    const unsupported = [
+      'method not found',
+      'does not exist',
+      'not supported',
+      'unsupported',
+      'not available',
+      'not whitelisted',
+      'not allowed',
+      'disabled',
+      'missing trie node',
+      'historical state',
+      'pruned',
+      'execution timeout',
+      'size limit',
+    ];
+    if (
+      rpcCodes.includes(-32601) ||
+      unsupported.some((marker) => text.includes(marker))
+    ) {
+      return false;
+    }
+
+    const transient = [
+      'timeout',
+      'timed out',
+      'etimedout',
+      'econnreset',
+      'econnrefused',
+      'socket hang up',
+      'network_error',
+      'missing response',
+      'rate limit',
+      'too many requests',
+      'bad gateway',
+      'service unavailable',
+    ];
+    return (
+      statuses.some((status) => status === 429 || status >= 500) ||
+      rpcCodes.includes(-32005) ||
+      transient.some((marker) => text.includes(marker))
+    );
+  }
+
+  /**
+   * The wallets whose handler calls paid exactly `amount` to `recipient`.
+   */
+  private findNativeDonationFunders(
+    handlerCalls: HandlerValueCall[],
+    recipient: string,
+    amount: bigint,
+  ): string[] {
+    const normalizedRecipient = normalizeAddress(recipient);
+    return [
+      ...new Set(
+        handlerCalls
+          .filter((call) =>
+            call.payouts.some(
+              (payout) =>
+                payout.to === normalizedRecipient && payout.value === amount,
+            ),
+          )
+          .map((call) => call.from),
+      ),
+    ];
   }
 
   private findBestMatchingInternalTransfer(params: {
@@ -761,6 +1159,7 @@ export class EvmTransactionService implements IChainHandler {
             amount,
             tokenAddress: log.address,
             isNativeToken: false,
+            logIndex: log.logIndex,
           });
         }
       } catch (error) {
@@ -847,16 +1246,16 @@ export class EvmTransactionService implements IChainHandler {
     networkId: number;
     tokenAddress: string;
     expectedFrom: string;
-    expectedAmount: number;
-    tokenDecimals: number;
+    recipient: string;
+    donationAmountRaw: bigint;
   }): string | null {
     const {
       receipt,
       networkId,
       tokenAddress,
       expectedFrom,
-      expectedAmount,
-      tokenDecimals,
+      recipient,
+      donationAmountRaw,
     } = params;
     const normalizedExpectedFrom = normalizeAddress(expectedFrom);
     const normalizedTokenAddress = normalizeAddress(tokenAddress);
@@ -865,17 +1264,26 @@ export class EvmTransactionService implements IChainHandler {
         normalizeAddress(address),
       ),
     );
-    const expectedAmountRaw = this.parseExpectedAmountRaw(
-      expectedAmount,
-      tokenDecimals,
-    );
-
-    const fundingTransfer = this.parseTransferEvents(receipt.logs).find(
+    const normalizedRecipient = normalizeAddress(recipient);
+    const tokenTransfersFromDonor = this.parseTransferEvents(
+      receipt.logs,
+    ).filter(
       (transfer) =>
         normalizeAddress(transfer.from) === normalizedExpectedFrom &&
-        handlerAddresses.has(normalizeAddress(transfer.to)) &&
-        normalizeAddress(transfer.tokenAddress) === normalizedTokenAddress &&
-        transfer.amount >= expectedAmountRaw,
+        normalizeAddress(transfer.tokenAddress) === normalizedTokenAddress,
+    );
+
+    // Either the handler first pulls the total from the donor into itself
+    // (donateManyERC20), or it moves the tokens straight from the donor to the
+    // recipient (transferFrom(donor, recipient)). The second shape shows up
+    // when a relayer submits the tx for a smart-account / EIP-7702 donor, so
+    // tx.from is the relayer and only the Transfer event names the donor.
+    const fundingTransfer = tokenTransfersFromDonor.find(
+      (transfer) =>
+        (handlerAddresses.has(normalizeAddress(transfer.to)) &&
+          transfer.amount >= donationAmountRaw) ||
+        (normalizeAddress(transfer.to) === normalizedRecipient &&
+          transfer.amount === donationAmountRaw),
     );
 
     return fundingTransfer ? fundingTransfer.from : null;
@@ -1167,39 +1575,230 @@ export class EvmTransactionService implements IChainHandler {
       this.mapWithConcurrency(
         uniqueTxHashes,
         LOG_ENRICHMENT_CONCURRENCY,
-        async (transactionHash): Promise<[string, string]> => {
-          const tx = await provider.getTransaction(transactionHash);
-          if (!tx) {
+        // The receipt carries both the tx sender and the token Transfer logs
+        // needed to attribute relayed donations, in a single lookup.
+        async (
+          transactionHash,
+        ): Promise<[string, ethers.providers.TransactionReceipt]> => {
+          const receipt = await provider.getTransactionReceipt(transactionHash);
+          if (!receipt) {
             throw new BlockchainError(
               BlockchainErrorCode.NETWORK_ERROR,
               `Transaction ${transactionHash} was unavailable during log enrichment on network ${networkId}`,
               { networkId, transactionHash },
             );
           }
-          return [transactionHash, tx.from];
+          return [transactionHash, receipt];
         },
       ),
     ]);
 
     const blockTimestamps = new Map<number, number>(blockEntries);
-    const txSenders = new Map<string, string>(txEntries);
+    const txReceipts = new Map<string, ethers.providers.TransactionReceipt>(
+      txEntries,
+    );
+    const handlerAddresses = new Set(
+      handlers.map((address) => normalizeAddress(address)),
+    );
+    const receiptOf = (txHash: string) =>
+      txReceipts.get(txHash) as ethers.providers.TransactionReceipt;
+
+    // Native donations only show their funder in a trace. Trace just the txs
+    // that didn't call the handler directly (relayed / contract calls); when
+    // tx.to is the handler the sender can only be tx.from.
+    const nativeTraceTxHashes = [
+      ...new Set(
+        decoded
+          .filter((d) => {
+            const txTo = receiptOf(d.transactionHash).to;
+            return (
+              d.isNativeToken &&
+              !!txTo &&
+              !handlerAddresses.has(normalizeAddress(txTo))
+            );
+          })
+          .map((d) => d.transactionHash),
+      ),
+    ];
+    const handlerCallsByTx = new Map(
+      await this.mapWithConcurrency(
+        nativeTraceTxHashes,
+        LOG_ENRICHMENT_CONCURRENCY,
+        async (txHash): Promise<[string, HandlerValueCall[] | null]> => [
+          txHash,
+          await this.getHandlerValueCallsForScan(networkId, txHash),
+        ],
+      ),
+    );
+
+    const inferredFunders = decoded.map((d) => {
+      const receipt = receiptOf(d.transactionHash);
+      const funder = this.inferDonationMadeLogFunder({
+        receipt,
+        handlerAddresses,
+        handlerCalls: handlerCallsByTx.get(d.transactionHash) ?? null,
+        donation: d,
+      });
+      return funder && funder !== normalizeAddress(receipt.from)
+        ? { address: funder, blockNumber: receipt.blockNumber }
+        : null;
+    });
+    const codeKey = (funder: { address: string; blockNumber: number }) =>
+      `${funder.address}@${funder.blockNumber}`;
+
+    // A funder that is a contract (router, zap, executor, Safe) is not the
+    // donor's wallet; only EOAs and EIP-7702-delegated EOAs replace tx.from.
+    // Code is read at the donation's block: a helper contract that later
+    // self-destructed would read as '0x' (an EOA) at the head.
+    const funderLookups = [
+      ...new Map(
+        inferredFunders
+          .filter(
+            (f): f is { address: string; blockNumber: number } => f !== null,
+          )
+          .map((f) => [codeKey(f), f]),
+      ).values(),
+    ];
+    const isWalletByFunder = new Map(
+      await this.mapWithConcurrency(
+        funderLookups,
+        LOG_ENRICHMENT_CONCURRENCY,
+        async (funder): Promise<[string, boolean]> => {
+          const { address } = funder;
+          try {
+            const code = (
+              await provider.getCode(address, funder.blockNumber)
+            ).toLowerCase();
+            return [
+              codeKey(funder),
+              code === '0x' || code.startsWith(EIP7702_DELEGATION_PREFIX),
+            ];
+          } catch (error) {
+            // Historical state may be pruned on a non-archive RPC, which would
+            // fail this range on every retry. Keep tx.from for this funder.
+            logger.warn(
+              'Code lookup failed during log enrichment; keeping tx.from',
+              {
+                networkId,
+                address,
+                blockNumber: funder.blockNumber,
+                error: error instanceof Error ? error.message : 'Unknown error',
+              },
+            );
+            return [codeKey(funder), false];
+          }
+        },
+      ),
+    );
 
     const logs: DonationMadeLog[] = decoded
-      .map((d) => ({
-        transactionHash: d.transactionHash,
-        logIndex: d.logIndex,
-        blockNumber: d.blockNumber,
-        blockTimestamp: blockTimestamps.get(d.blockNumber) as number,
-        from: txSenders.get(d.transactionHash) as string,
-        to: d.to,
-        tokenAddress: d.tokenAddress,
-        amount: d.amount,
-        isNativeToken: d.isNativeToken,
-      }))
+      .map((d, i) => {
+        const funder = inferredFunders[i];
+        return {
+          transactionHash: d.transactionHash,
+          logIndex: d.logIndex,
+          blockNumber: d.blockNumber,
+          blockTimestamp: blockTimestamps.get(d.blockNumber) as number,
+          from:
+            funder && isWalletByFunder.get(codeKey(funder))
+              ? funder.address
+              : receiptOf(d.transactionHash).from,
+          to: d.to,
+          tokenAddress: d.tokenAddress,
+          amount: d.amount,
+          isNativeToken: d.isNativeToken,
+        };
+      })
       // Deterministic ordering so the cron processes events chronologically.
       .sort((a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex);
 
     return { networkId, fromBlock, toBlock: effectiveTo, latestBlock, logs };
+  }
+
+  /**
+   * The wallet whose funds paid a reconciler DonationMade log, or null when it
+   * can't be told. tx.from is wrong when a relayer submits for a smart-account
+   * / EIP-7702 donor. For ERC-20 we look for the Transfer that paid this
+   * recipient: straight from the donor (same token, recipient and amount), or
+   * handler-to-recipient after the donor funded the handler, taking the
+   * nearest Transfer before the DonationMade log. For native we use the traced
+   * handler call that paid exactly this amount to this recipient.
+   */
+  private inferDonationMadeLogFunder(params: {
+    receipt: ethers.providers.TransactionReceipt;
+    handlerAddresses: Set<string>;
+    handlerCalls: HandlerValueCall[] | null;
+    donation: {
+      logIndex: number;
+      to: string;
+      tokenAddress: string;
+      amount: string;
+      isNativeToken: boolean;
+    };
+  }): string | null {
+    const { receipt, handlerAddresses, handlerCalls, donation } = params;
+    const amount = BigInt(donation.amount);
+
+    if (donation.isNativeToken) {
+      if (!handlerCalls) {
+        return null;
+      }
+      const funders = this.findNativeDonationFunders(
+        handlerCalls,
+        donation.to,
+        amount,
+      );
+      return funders.length === 1 ? funders[0] : null;
+    }
+
+    const token = normalizeAddress(donation.tokenAddress);
+    const recipient = normalizeAddress(donation.to);
+    const byProximity = (a: DonationTransferInfo, b: DonationTransferInfo) =>
+      this.logOrderKey(a.logIndex, donation.logIndex) -
+      this.logOrderKey(b.logIndex, donation.logIndex);
+
+    const tokenTransfers = this.parseTransferEvents(receipt.logs).filter(
+      (transfer) => normalizeAddress(transfer.tokenAddress) === token,
+    );
+    const payout = tokenTransfers
+      .filter(
+        (transfer) =>
+          normalizeAddress(transfer.to) === recipient &&
+          transfer.amount === amount,
+      )
+      .sort(byProximity)[0];
+
+    if (!payout) {
+      return null;
+    }
+    if (!handlerAddresses.has(normalizeAddress(payout.from))) {
+      return normalizeAddress(payout.from);
+    }
+
+    const funding = tokenTransfers
+      .filter(
+        (transfer) =>
+          handlerAddresses.has(normalizeAddress(transfer.to)) &&
+          !handlerAddresses.has(normalizeAddress(transfer.from)) &&
+          transfer.amount >= amount,
+      )
+      .sort(byProximity)[0];
+
+    return funding ? normalizeAddress(funding.from) : null;
+  }
+
+  /**
+   * Sort key that puts logs before `reference` first, nearest first (the
+   * handler moves the tokens, then emits DonationMade), and only then logs
+   * after it, nearest first.
+   */
+  private logOrderKey(logIndex: number | undefined, reference: number): number {
+    if (logIndex === undefined) {
+      return Number.MAX_SAFE_INTEGER;
+    }
+    return logIndex <= reference
+      ? reference - logIndex
+      : Number.MAX_SAFE_INTEGER / 2 + (logIndex - reference);
   }
 
   /**
@@ -1416,6 +2015,39 @@ export class EvmTransactionService implements IChainHandler {
           },
         );
       }
+
+      // A relayer (tx.from) may submit for a smart-account / EIP-7702 donor;
+      // the donor's value then reaches the handler as an internal call. When
+      // tx.to is the handler itself the sender can only be tx.from, so there
+      // is nothing to trace. Otherwise credit the expected donor only when the
+      // trace shows their own handler call paying exactly this donation to
+      // this recipient, and no other wallet's call doing the same.
+      const expectedFrom = normalizeAddress(input.fromAddress);
+      if (
+        normalizeAddress(donationTransfer.from) !== expectedFrom &&
+        tx.to &&
+        !isDonationHandlerAddress(networkId, tx.to)
+      ) {
+        const handlerCalls = await this.getHandlerValueCalls(networkId, txHash);
+        const funders = handlerCalls
+          ? this.findNativeDonationFunders(
+              handlerCalls,
+              donationTransfer.to,
+              donationTransfer.amount,
+            )
+          : [];
+        if (funders.length === 1 && funders[0] === expectedFrom) {
+          logger.debug(
+            'Inferred native donation sender from its handler call',
+            {
+              txHash,
+              donationEventSender: donationTransfer.from,
+              inferredSender: expectedFrom,
+            },
+          );
+          donationTransfer = { ...donationTransfer, from: expectedFrom };
+        }
+      }
     } else {
       // User expects ERC-20 token - look for ERC-20 transfers
       // tokenAddress is required for ERC-20 (validated above)
@@ -1445,8 +2077,8 @@ export class EvmTransactionService implements IChainHandler {
             networkId,
             tokenAddress: tokenAddress!,
             expectedFrom: input.fromAddress,
-            expectedAmount: amount,
-            tokenDecimals: erc20TokenDecimals,
+            recipient: donationTransfer.to,
+            donationAmountRaw: donationTransfer.amount,
           },
         );
 

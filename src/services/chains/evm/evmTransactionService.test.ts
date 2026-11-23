@@ -632,6 +632,509 @@ describe('EvmTransactionService', () => {
         providers.delete(137);
       }
     });
+    it('attributes the donation when the claim is within tolerance above the on-chain amount', async () => {
+      const amountRaw = ethers.utils.parseUnits('1', 6);
+      const word = '0x' + amountRaw.toHexString().slice(2).padStart(64, '0');
+      const topic = (address: string) =>
+        '0x000000000000000000000000' + address.slice(2).toLowerCase();
+      const base = {
+        blockHash:
+          '0xabcd000000000000000000000000000000000000000000000000000000000000',
+        blockNumber: 12345,
+        removed: false,
+        transactionHash: TX_HASH,
+        transactionIndex: 0,
+      };
+      const fakeProvider = {
+        getTransaction: sinon.stub().resolves({
+          hash: TX_HASH,
+          from: RELAYER_ADDRESS,
+          to: DONATION_HANDLER,
+          value: ethers.BigNumber.from(0),
+          nonce: 10,
+          blockNumber: 12345,
+          gasPrice: ethers.BigNumber.from(1),
+        }),
+        getTransactionReceipt: sinon.stub().resolves({
+          status: 1,
+          blockNumber: 12345,
+          gasUsed: ethers.BigNumber.from(21000),
+          logs: [
+            {
+              ...base,
+              address: USDC_ADDRESS,
+              data: word,
+              logIndex: 0,
+              topics: [
+                TRANSFER_TOPIC,
+                topic(DONOR_ADDRESS),
+                topic(DONATION_HANDLER),
+              ],
+            },
+            {
+              ...base,
+              address: DONATION_HANDLER,
+              data: word,
+              logIndex: 1,
+              topics: [
+                DONATION_MADE_TOPIC,
+                topic(RECIPIENT),
+                topic(USDC_ADDRESS),
+              ],
+            },
+          ],
+        }),
+        getBlock: sinon.stub().resolves({ timestamp: 1777305051 }),
+      };
+      const decimalsStub = sinon
+        .stub(evmTransactionService, 'getTokenDecimals')
+        .resolves(6);
+      const symbolStub = sinon
+        .stub(evmTransactionService, 'getTokenSymbol')
+        .resolves('USDC');
+      providers.set(137, fakeProvider);
+      try {
+        // The donor funded exactly 1 USDC; the claim is 1.005 (within 1%).
+        const result = await evmTransactionService.getTransactionInfo({
+          txHash: TX_HASH,
+          networkId: 137,
+          symbol: 'USDC',
+          fromAddress: DONOR_ADDRESS,
+          toAddress: RECIPIENT,
+          amount: 1.005,
+          timestamp: 1777305051,
+          tokenAddress: USDC_ADDRESS,
+        });
+        expect(result.from.toLowerCase()).to.equal(DONOR_ADDRESS.toLowerCase());
+      } finally {
+        decimalsStub.restore();
+        symbolStub.restore();
+        providers.delete(137);
+      }
+    });
+  });
+
+  // Mirrors Arbitrum tx 0xce56da76…5f13 (prod donations 238765922/3): a
+  // relayer submits for an EIP-7702 donor and the handler moves USDT straight
+  // from the donor to each recipient, so no Transfer goes to the handler.
+  describe('getTransactionInfo (relayed EIP-7702 donation handler)', () => {
+    const RELAYER_ADDRESS = '0xb42f812a44c22cc6b861478900401ee759ebead6';
+    const RELAY_CONTRACT = '0xdb9b1e94b5b69df7e401ddbede43491141047db3';
+    const DONOR_ADDRESS = '0xd95fa7f4a3a1a0abaf1f97ae9ea02d75b2134f3b';
+    const RECIPIENT_A = '0xaab3590a496cf01dc5246a6f69d2bd245775eeb2';
+    const RECIPIENT_B = '0x4d9339dd97db55e3b9bcbe65de39ff9c04d1c2cd';
+    const RELAYER_FEE_RECEIVER = '0xe3478b0bb1a5084567c319096437924948be1964';
+    const USDT_ADDRESS = '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9';
+    const TX_HASH =
+      '0xce56da769548d256b02a1b226756bf5477a6a5432c4646e77cb99debaca35f13';
+    const pad = (address: string) =>
+      '0x000000000000000000000000' + address.slice(2).toLowerCase();
+    const uint = (value: ethers.BigNumber) =>
+      '0x' + value.toHexString().slice(2).padStart(64, '0');
+
+    let logIndex = 0;
+    const makeLog = (
+      address: string,
+      topics: string[],
+      data: string,
+    ): ethers.providers.Log => ({
+      address,
+      blockHash:
+        '0x7dc31058c9f98053dd6946b71b4c70808e18fd6b964b380ed77caf615bc89765',
+      blockNumber: 526261453,
+      data,
+      logIndex: logIndex++,
+      removed: false,
+      topics,
+      transactionHash: TX_HASH,
+      transactionIndex: 2,
+    });
+
+    const runVerification = async (params: {
+      fromAddress: string;
+      toAddress: string;
+      amount: number;
+      // Overrides for the donor -> RECIPIENT_A Transfer (negative cases).
+      recipientATransfer?: { token?: string; value?: ethers.BigNumber };
+    }) => {
+      const { recipientATransfer, ...input } = params;
+      logIndex = 0;
+      const handler = getDonationHandlerAddresses(NetworkId.ARBITRUM)[0];
+      const tenUsdt = ethers.utils.parseUnits('10', 6);
+      const oneUsdt = ethers.utils.parseUnits('1', 6);
+      const transfer = (
+        to: string,
+        value: ethers.BigNumber,
+        token: string = USDT_ADDRESS,
+      ) =>
+        makeLog(
+          token,
+          [TRANSFER_TOPIC, pad(DONOR_ADDRESS), pad(to)],
+          uint(value),
+        );
+      const donationMade = (to: string, value: ethers.BigNumber) =>
+        makeLog(
+          handler,
+          [DONATION_MADE_TOPIC, pad(to), pad(USDT_ADDRESS)],
+          uint(value) +
+            '0000000000000000000000000000000000000000000000000000000000000040' +
+            '0000000000000000000000000000000000000000000000000000000000000000',
+        );
+      const receipt = {
+        status: 1,
+        blockNumber: 526261453,
+        gasUsed: ethers.BigNumber.from(315789),
+        logs: [
+          transfer(
+            RECIPIENT_A,
+            recipientATransfer?.value ?? tenUsdt,
+            recipientATransfer?.token,
+          ),
+          donationMade(RECIPIENT_A, tenUsdt),
+          transfer(RECIPIENT_B, oneUsdt),
+          donationMade(RECIPIENT_B, oneUsdt),
+          transfer(RELAYER_FEE_RECEIVER, ethers.BigNumber.from(18956)),
+        ],
+      };
+      const fakeProvider = {
+        getTransaction: sinon.stub().resolves({
+          hash: TX_HASH,
+          from: RELAYER_ADDRESS,
+          to: RELAY_CONTRACT,
+          value: ethers.BigNumber.from(0),
+          nonce: 382297,
+          blockNumber: 526261453,
+          gasPrice: ethers.BigNumber.from(20116001),
+        }),
+        getTransactionReceipt: sinon.stub().resolves(receipt),
+        getBlock: sinon.stub().resolves({ timestamp: 1795269063 }),
+      };
+      const decimalsStub = sinon
+        .stub(evmTransactionService, 'getTokenDecimals')
+        .resolves(6);
+      const symbolStub = sinon
+        .stub(evmTransactionService, 'getTokenSymbol')
+        .resolves('USDT');
+      providers.set(NetworkId.ARBITRUM, fakeProvider);
+      try {
+        return await evmTransactionService.getTransactionInfo({
+          txHash: TX_HASH,
+          networkId: NetworkId.ARBITRUM,
+          symbol: 'USDT',
+          tokenAddress: USDT_ADDRESS,
+          timestamp: 1795269063,
+          ...input,
+        });
+      } finally {
+        decimalsStub.restore();
+        symbolStub.restore();
+        providers.delete(NetworkId.ARBITRUM);
+      }
+    };
+
+    it('attributes each donation to the donor, not the relayer', async () => {
+      const first = await runVerification({
+        fromAddress: DONOR_ADDRESS,
+        toAddress: RECIPIENT_A,
+        amount: 10,
+      });
+      expect(first.from.toLowerCase()).to.equal(DONOR_ADDRESS);
+      expect(first.to.toLowerCase()).to.equal(RECIPIENT_A);
+      expect(first.amount).to.equal(10);
+
+      const second = await runVerification({
+        fromAddress: DONOR_ADDRESS,
+        toAddress: RECIPIENT_B,
+        amount: 1,
+      });
+      expect(second.from.toLowerCase()).to.equal(DONOR_ADDRESS);
+      expect(second.to.toLowerCase()).to.equal(RECIPIENT_B);
+      expect(second.amount).to.equal(1);
+    });
+
+    it('does not attribute the donation to a wallet that sent nothing', async () => {
+      const result = await runVerification({
+        fromAddress: '0x73a9b7a729dba2f5ee7b3b392d98b0a3afce6672',
+        toAddress: RECIPIENT_A,
+        amount: 10,
+      });
+      expect(result.from.toLowerCase()).to.equal(RELAYER_ADDRESS);
+    });
+
+    it('does not attribute the donation when the donor Transfer amount differs', async () => {
+      const result = await runVerification({
+        fromAddress: DONOR_ADDRESS,
+        toAddress: RECIPIENT_A,
+        amount: 10,
+        recipientATransfer: { value: ethers.utils.parseUnits('9', 6) },
+      });
+      expect(result.from.toLowerCase()).to.equal(RELAYER_ADDRESS);
+    });
+
+    it('does not attribute the donation when the donor Transfer is another token', async () => {
+      const result = await runVerification({
+        fromAddress: DONOR_ADDRESS,
+        toAddress: RECIPIENT_A,
+        amount: 10,
+        recipientATransfer: {
+          token: '0xaf88d065e77c8cc2239327c5edb3a432268e5831',
+        },
+      });
+      expect(result.from.toLowerCase()).to.equal(RELAYER_ADDRESS);
+    });
+
+    describe('native', () => {
+      const handler = getDonationHandlerAddresses(NetworkId.ARBITRUM)[0];
+      const OTHER_DONOR = '0x73a9b7a729dba2f5ee7b3b392d98b0a3afce6672';
+      const oneEth = ethers.utils.parseEther('1');
+      const NATIVE = '0x0000000000000000000000000000000000000000';
+
+      // One handler call per funder: the funder sends `value` into the
+      // handler (behind a proxy delegatecall), which pays each recipient.
+      const handlerCall = (
+        from: string,
+        payouts: Array<[string, ethers.BigNumber]>,
+        reverted = false,
+      ) => ({
+        ...(reverted ? { error: 'execution reverted' } : {}),
+        type: 'CALL',
+        from,
+        to: handler,
+        value: payouts
+          .reduce((sum, [, v]) => sum.add(v), ethers.BigNumber.from(0))
+          .toHexString(),
+        calls: [
+          {
+            type: 'DELEGATECALL',
+            from: handler,
+            to: '0x1111111111111111111111111111111111111111',
+            calls: payouts.map(([to, v]) => ({
+              type: 'CALL',
+              from: handler,
+              to,
+              value: v.toHexString(),
+            })),
+          },
+        ],
+      });
+
+      const runNative = async (params: {
+        txTo?: string;
+        calls: Array<ReturnType<typeof handlerCall>>;
+        fromAddress: string;
+        toAddress: string;
+        send?: sinon.SinonStub;
+      }) => {
+        logIndex = 0;
+        const donationLogs = params.calls.flatMap((call) =>
+          call.calls[0].calls.map((payout) =>
+            makeLog(
+              handler,
+              [DONATION_MADE_TOPIC, pad(payout.to), pad(NATIVE)],
+              uint(ethers.BigNumber.from(payout.value)) +
+                '0000000000000000000000000000000000000000000000000000000000000040' +
+                '0000000000000000000000000000000000000000000000000000000000000000',
+            ),
+          ),
+        );
+        const send =
+          params.send ??
+          sinon.stub().resolves({
+            type: 'CALL',
+            from: RELAYER_ADDRESS,
+            to: params.txTo ?? RELAY_CONTRACT,
+            value: '0x0',
+            calls: params.calls,
+          });
+        const fakeProvider = {
+          getTransaction: sinon.stub().resolves({
+            hash: TX_HASH,
+            from: RELAYER_ADDRESS,
+            to: params.txTo ?? RELAY_CONTRACT,
+            value: ethers.BigNumber.from(0),
+            nonce: 1,
+            blockNumber: 526261453,
+            gasPrice: ethers.BigNumber.from(1),
+          }),
+          getTransactionReceipt: sinon.stub().resolves({
+            status: 1,
+            blockNumber: 526261453,
+            gasUsed: ethers.BigNumber.from(100000),
+            logs: donationLogs,
+          }),
+          getBlock: sinon.stub().resolves({ timestamp: 1795269063 }),
+          send,
+        };
+        providers.set(NetworkId.ARBITRUM, fakeProvider);
+        try {
+          const result = await evmTransactionService.getTransactionInfo({
+            txHash: TX_HASH,
+            networkId: NetworkId.ARBITRUM,
+            symbol: 'ETH',
+            fromAddress: params.fromAddress,
+            toAddress: params.toAddress,
+            amount: 1,
+            timestamp: 1795269063,
+          });
+          return { from: result.from.toLowerCase(), send };
+        } finally {
+          providers.delete(NetworkId.ARBITRUM);
+        }
+      };
+
+      it('credits the donor whose handler call paid this recipient', async () => {
+        const { from } = await runNative({
+          calls: [handlerCall(DONOR_ADDRESS, [[RECIPIENT_A, oneEth]])],
+          fromAddress: DONOR_ADDRESS,
+          toAddress: RECIPIENT_A,
+        });
+        expect(from).to.equal(DONOR_ADDRESS);
+      });
+
+      it('never credits a wallet the trace does not show funding it', async () => {
+        const { from } = await runNative({
+          calls: [handlerCall(DONOR_ADDRESS, [[RECIPIENT_A, oneEth]])],
+          fromAddress: OTHER_DONOR,
+          toAddress: RECIPIENT_A,
+        });
+        expect(from).to.equal(RELAYER_ADDRESS);
+      });
+
+      it("does not let one batch donor claim another donor's donation", async () => {
+        // A gives 1 ETH to P1 and B gives 1 ETH to P2 in one relayer batch;
+        // A claims the P2 donation.
+        const { from } = await runNative({
+          calls: [
+            handlerCall(DONOR_ADDRESS, [[RECIPIENT_A, oneEth]]),
+            handlerCall(OTHER_DONOR, [[RECIPIENT_B, oneEth]]),
+          ],
+          fromAddress: DONOR_ADDRESS,
+          toAddress: RECIPIENT_B,
+        });
+        expect(from).to.equal(RELAYER_ADDRESS);
+      });
+
+      it('ignores a reverted handler call next to a successful one', async () => {
+        // A's call to P1 reverted inside a try/catch batch; B's to P2 landed.
+        const calls = [
+          handlerCall(DONOR_ADDRESS, [[RECIPIENT_A, oneEth]], true),
+          handlerCall(OTHER_DONOR, [[RECIPIENT_B, oneEth]]),
+        ];
+        const reverted = await runNative({
+          calls,
+          fromAddress: DONOR_ADDRESS,
+          toAddress: RECIPIENT_A,
+        });
+        expect(reverted.from).to.equal(RELAYER_ADDRESS);
+
+        const landed = await runNative({
+          calls,
+          fromAddress: OTHER_DONOR,
+          toAddress: RECIPIENT_B,
+        });
+        expect(landed.from).to.equal(OTHER_DONOR.toLowerCase());
+      });
+
+      it('fails as retryable when tracing times out, crediting no one', async () => {
+        const timeout = Object.assign(new Error('timeout exceeded'), {
+          code: 'TIMEOUT',
+        });
+        let error: unknown;
+        try {
+          await runNative({
+            calls: [handlerCall(DONOR_ADDRESS, [[RECIPIENT_A, oneEth]])],
+            fromAddress: DONOR_ADDRESS,
+            toAddress: RECIPIENT_A,
+            send: sinon.stub().rejects(timeout),
+          });
+        } catch (e) {
+          error = e;
+        }
+        expect(error).to.be.instanceOf(BlockchainError);
+        expect((error as BlockchainError).code).to.equal(
+          BlockchainErrorCode.NETWORK_ERROR,
+        );
+      });
+
+      const traceError = (message: string, extra: object = {}) =>
+        Object.assign(new Error(message), extra);
+      const verifyWithTraceError = (error: Error) =>
+        runNative({
+          calls: [handlerCall(DONOR_ADDRESS, [[RECIPIENT_A, oneEth]])],
+          fromAddress: DONOR_ADDRESS,
+          toAddress: RECIPIENT_A,
+          send: sinon.stub().rejects(error),
+        });
+
+      it('fails as retryable on a structured 5xx status', async () => {
+        let error: unknown;
+        try {
+          await verifyWithTraceError(
+            traceError('bad response', { code: 'SERVER_ERROR', status: 503 }),
+          );
+        } catch (e) {
+          error = e;
+        }
+        expect((error as BlockchainError).code).to.equal(
+          BlockchainErrorCode.NETWORK_ERROR,
+        );
+      });
+
+      it('does not read a JSON-RPC request id as an HTTP status', async () => {
+        // ethers embeds the request body; "id":512 is not a 5xx.
+        const body =
+          '{"jsonrpc":"2.0","id":512,"error":{"code":-32000,"message":"tracer rejected"}}';
+        const { from } = await verifyWithTraceError(
+          traceError(
+            `processing response error (body=${JSON.stringify(body)}, requestBody={"id":512})`,
+            { code: 'SERVER_ERROR', body },
+          ),
+        );
+        expect(from).to.equal(RELAYER_ADDRESS);
+
+        const unsupported = await verifyWithTraceError(
+          traceError('method not found (requestBody={"id":512})', {
+            code: 'SERVER_ERROR',
+          }),
+        );
+        expect(unsupported.from).to.equal(RELAYER_ADDRESS);
+      });
+
+      it('treats a tracer execution timeout or size limit as unsupported', async () => {
+        for (const message of [
+          'execution timeout',
+          'trace response size limit exceeded',
+        ]) {
+          const { from } = await verifyWithTraceError(traceError(message));
+          expect(from).to.equal(RELAYER_ADDRESS);
+        }
+      });
+
+      it('keeps the relayer when the RPC has no tracing methods', async () => {
+        const { from } = await runNative({
+          calls: [handlerCall(DONOR_ADDRESS, [[RECIPIENT_A, oneEth]])],
+          fromAddress: DONOR_ADDRESS,
+          toAddress: RECIPIENT_A,
+          send: sinon.stub().rejects(
+            Object.assign(new Error('the method does not exist'), {
+              code: -32601,
+            }),
+          ),
+        });
+        expect(from).to.equal(RELAYER_ADDRESS);
+      });
+
+      it('does not trace when the tx called the handler directly', async () => {
+        const { from, send } = await runNative({
+          txTo: handler,
+          calls: [handlerCall(DONOR_ADDRESS, [[RECIPIENT_A, oneEth]])],
+          fromAddress: DONOR_ADDRESS,
+          toAddress: RECIPIENT_A,
+        });
+        expect(send.called).to.equal(false);
+        expect(from).to.equal(RELAYER_ADDRESS);
+      });
+    });
   });
 
   describe('getTransactionInfo (Account Abstraction donation handler)', () => {
@@ -1080,7 +1583,9 @@ describe('EvmTransactionService', () => {
       getBlockNumber: sinon.SinonStub;
       getLogs: sinon.SinonStub;
       getBlock: sinon.SinonStub;
-      getTransaction: sinon.SinonStub;
+      getTransactionReceipt: sinon.SinonStub;
+      getCode: sinon.SinonStub;
+      send: sinon.SinonStub;
     };
 
     const setProvider = (networkId: number) => {
@@ -1090,9 +1595,12 @@ describe('EvmTransactionService', () => {
         getBlock: sinon
           .stub()
           .callsFake(async (bn: number) => ({ timestamp: 1_700_000_000 + bn })),
-        getTransaction: sinon
-          .stub()
-          .callsFake(async (hash: string) => ({ from: `0xsender_${hash}` })),
+        getTransactionReceipt: sinon.stub().callsFake(async (hash: string) => ({
+          from: `0xsender_${hash}`,
+          logs: [],
+        })),
+        getCode: sinon.stub().resolves('0x'),
+        send: sinon.stub().rejects(new Error('tracing not supported')),
       };
       providers.set(networkId, provider);
     };
@@ -1142,6 +1650,400 @@ describe('EvmTransactionService', () => {
       expect(erc20.isNativeToken).to.be.false;
       expect(erc20.tokenAddress).to.equal('0x' + ERC20);
       expect(erc20.amount).to.equal('2500000');
+    });
+
+    describe('sender attribution for relayed donations', () => {
+      const RELAYER = '0x' + 'e'.repeat(40);
+      const RELAY_CONTRACT = '0x' + '9'.repeat(40);
+      const DONOR = '0x' + 'd'.repeat(40);
+      const OTHER_DONOR = '0x' + '7'.repeat(40);
+      const ROUTER = '0x' + '8'.repeat(40);
+      const OTHER_TOKEN = 'c'.repeat(40);
+      const transferLog = (i: {
+        token40?: string;
+        from: string;
+        to: string;
+        amount: string;
+        logIndex: number;
+      }) =>
+        ({
+          address: '0x' + (i.token40 ?? ERC20),
+          topics: [
+            TRANSFER_TOPIC,
+            topicOf(i.from.slice(2)),
+            topicOf(i.to.slice(2)),
+          ],
+          data: amountData(i.amount),
+          logIndex: i.logIndex,
+        }) as unknown as ethers.providers.Log;
+
+      const scan = async (params: {
+        receiptLogs?: ethers.providers.Log[];
+        native?: boolean;
+        donationLogIndex?: number;
+        txTo?: string;
+      }) => {
+        setProvider(NetworkId.MAINNET);
+        provider.getLogs.resolves([
+          makeLog({
+            recipient40: RECIP,
+            token40: params.native ? NATIVE_40 : ERC20,
+            amount: '2500000',
+            blockNumber: 120,
+            logIndex: params.donationLogIndex ?? 5,
+            transactionHash: '0xrelayed',
+          }),
+        ]);
+        provider.getTransactionReceipt.resolves({
+          from: RELAYER,
+          to: params.txTo ?? RELAY_CONTRACT,
+          blockNumber: 120,
+          logs: params.receiptLogs ?? [],
+        });
+        const result = await evmTransactionService.getDonationHandlerLogs(
+          NetworkId.MAINNET,
+          100,
+          200,
+        );
+        return result.logs[0].from;
+      };
+
+      it('uses the donor of a direct donor-to-recipient Transfer', async () => {
+        const from = await scan({
+          receiptLogs: [
+            transferLog({
+              from: DONOR,
+              to: '0x' + RECIP,
+              amount: '2500000',
+              logIndex: 4,
+            }),
+          ],
+        });
+        expect(from).to.equal(DONOR);
+      });
+
+      it('uses the donor that funded the handler for a handler payout', async () => {
+        const handler = getDonationHandlerAddresses(NetworkId.MAINNET)[0];
+        const from = await scan({
+          receiptLogs: [
+            transferLog({
+              from: DONOR,
+              to: handler,
+              amount: '3000000',
+              logIndex: 1,
+            }),
+            transferLog({
+              from: handler,
+              to: '0x' + RECIP,
+              amount: '2500000',
+              logIndex: 4,
+            }),
+          ],
+        });
+        expect(from).to.equal(DONOR);
+      });
+
+      it('prefers the preceding funding Transfer over a nearer later one', async () => {
+        // A funds a 5-recipient batch at log 0; B funds the handler with the
+        // same token right after A's DonationMade (log 11).
+        const handler = getDonationHandlerAddresses(NetworkId.MAINNET)[0];
+        const from = await scan({
+          donationLogIndex: 10,
+          receiptLogs: [
+            transferLog({
+              from: DONOR,
+              to: handler,
+              amount: '12500000',
+              logIndex: 0,
+            }),
+            transferLog({
+              from: handler,
+              to: '0x' + RECIP,
+              amount: '2500000',
+              logIndex: 9,
+            }),
+            transferLog({
+              from: OTHER_DONOR,
+              to: handler,
+              amount: '2500000',
+              logIndex: 11,
+            }),
+          ],
+        });
+        expect(from).to.equal(DONOR);
+      });
+
+      it('keeps tx.from when no Transfer matches token and amount', async () => {
+        const from = await scan({
+          receiptLogs: [
+            transferLog({
+              from: DONOR,
+              to: '0x' + RECIP,
+              amount: '2499999',
+              logIndex: 3,
+            }),
+            transferLog({
+              token40: OTHER_TOKEN,
+              from: DONOR,
+              to: '0x' + RECIP,
+              amount: '2500000',
+              logIndex: 4,
+            }),
+          ],
+        });
+        expect(from).to.equal(RELAYER);
+      });
+
+      it('keeps tx.from when the funder is a contract (router / zap)', async () => {
+        setProvider(NetworkId.MAINNET);
+        // The router had code at the donation's block (120) but has since
+        // self-destructed, so it reads as '0x' at the head.
+        provider.getCode.withArgs(ROUTER, 120).resolves('0x6080604052');
+        provider.getLogs.resolves([
+          makeLog({
+            recipient40: RECIP,
+            token40: ERC20,
+            amount: '2500000',
+            blockNumber: 120,
+            logIndex: 5,
+            transactionHash: '0xrouted',
+          }),
+        ]);
+        provider.getTransactionReceipt.resolves({
+          from: RELAYER,
+          to: ROUTER,
+          blockNumber: 120,
+          logs: [
+            transferLog({
+              from: ROUTER,
+              to: '0x' + RECIP,
+              amount: '2500000',
+              logIndex: 4,
+            }),
+          ],
+        });
+        const result = await evmTransactionService.getDonationHandlerLogs(
+          NetworkId.MAINNET,
+          100,
+          200,
+        );
+        expect(provider.getCode.calledWith(ROUTER, 120)).to.equal(true);
+        expect(result.logs[0].from).to.equal(RELAYER);
+      });
+
+      it('credits an EIP-7702-delegated donor', async () => {
+        setProvider(NetworkId.MAINNET);
+        provider.getCode
+          .withArgs(DONOR)
+          .resolves('0xef0100' + '63c0c19a282a1b52b07dd5a65b58948a07dae32b');
+        provider.getLogs.resolves([
+          makeLog({
+            recipient40: RECIP,
+            token40: ERC20,
+            amount: '2500000',
+            blockNumber: 120,
+            logIndex: 5,
+            transactionHash: '0xrelayed',
+          }),
+        ]);
+        provider.getTransactionReceipt.resolves({
+          from: RELAYER,
+          to: RELAY_CONTRACT,
+          blockNumber: 120,
+          logs: [
+            transferLog({
+              from: DONOR,
+              to: '0x' + RECIP,
+              amount: '2500000',
+              logIndex: 4,
+            }),
+          ],
+        });
+        const result = await evmTransactionService.getDonationHandlerLogs(
+          NetworkId.MAINNET,
+          100,
+          200,
+        );
+        expect(result.logs[0].from).to.equal(DONOR);
+        expect(provider.getCode.calledWith(DONOR, 120)).to.equal(true);
+      });
+
+      it('credits the traced funder of a relayed native donation', async () => {
+        const handler = getDonationHandlerAddresses(
+          NetworkId.MAINNET,
+        )[0].toLowerCase();
+        setProvider(NetworkId.MAINNET);
+        provider.send.withArgs('debug_traceTransaction').resolves({
+          type: 'CALL',
+          from: RELAYER,
+          to: RELAY_CONTRACT,
+          value: '0x0',
+          calls: [
+            {
+              type: 'CALL',
+              from: DONOR,
+              to: handler,
+              value: '0x2625a0',
+              calls: [
+                {
+                  type: 'CALL',
+                  from: handler,
+                  to: '0x' + RECIP,
+                  value: '0x2625a0',
+                },
+              ],
+            },
+          ],
+        });
+        provider.getLogs.resolves([
+          makeLog({
+            recipient40: RECIP,
+            token40: NATIVE_40,
+            amount: '2500000',
+            blockNumber: 120,
+            logIndex: 5,
+            transactionHash: '0xrelayed',
+          }),
+        ]);
+        provider.getTransactionReceipt.resolves({
+          from: RELAYER,
+          to: RELAY_CONTRACT,
+          logs: [],
+        });
+        const result = await evmTransactionService.getDonationHandlerLogs(
+          NetworkId.MAINNET,
+          100,
+          200,
+        );
+        expect(result.logs[0].from).to.equal(DONOR);
+      });
+
+      it('ignores reverted trace_transaction entries and their subtree', async () => {
+        const handler = getDonationHandlerAddresses(
+          NetworkId.MAINNET,
+        )[0].toLowerCase();
+        setProvider(NetworkId.MAINNET);
+        const entry = (
+          traceAddress: number[],
+          action: { from: string; to: string; value: string },
+          error?: string,
+        ) => ({
+          action: { callType: 'call', ...action },
+          traceAddress,
+          ...(error ? { error } : {}),
+        });
+        // OTHER_DONOR's call paying RECIP reverted; DONOR's call paying a
+        // different recipient landed. Neither may be credited for RECIP.
+        provider.send.withArgs('trace_transaction').resolves([
+          entry([], { from: RELAYER, to: RELAY_CONTRACT, value: '0x0' }),
+          entry(
+            [0],
+            { from: OTHER_DONOR, to: handler, value: '0x2625a0' },
+            'Reverted',
+          ),
+          entry([0, 0], {
+            from: handler,
+            to: '0x' + RECIP,
+            value: '0x2625a0',
+          }),
+          entry([1], { from: DONOR, to: handler, value: '0x2625a0' }),
+          entry([1, 0], {
+            from: handler,
+            to: '0x' + 'f'.repeat(40),
+            value: '0x2625a0',
+          }),
+        ]);
+        provider.getLogs.resolves([
+          makeLog({
+            recipient40: RECIP,
+            token40: NATIVE_40,
+            amount: '2500000',
+            blockNumber: 120,
+            logIndex: 5,
+            transactionHash: '0xreverted',
+          }),
+        ]);
+        provider.getTransactionReceipt.resolves({
+          from: RELAYER,
+          to: RELAY_CONTRACT,
+          blockNumber: 120,
+          logs: [],
+        });
+        const result = await evmTransactionService.getDonationHandlerLogs(
+          NetworkId.MAINNET,
+          100,
+          200,
+        );
+        expect(provider.send.calledWith('trace_transaction')).to.equal(true);
+        expect(result.logs[0].from).to.equal(RELAYER);
+      });
+
+      it('keeps tx.from and still returns when the historical code lookup fails', async () => {
+        setProvider(NetworkId.MAINNET);
+        provider.getCode.rejects(new Error('missing trie node abc123'));
+        provider.getLogs.resolves([
+          makeLog({
+            recipient40: RECIP,
+            token40: ERC20,
+            amount: '2500000',
+            blockNumber: 120,
+            logIndex: 5,
+            transactionHash: '0xpruned',
+          }),
+        ]);
+        provider.getTransactionReceipt.resolves({
+          from: RELAYER,
+          to: RELAY_CONTRACT,
+          blockNumber: 120,
+          logs: [
+            transferLog({
+              from: DONOR,
+              to: '0x' + RECIP,
+              amount: '2500000',
+              logIndex: 4,
+            }),
+          ],
+        });
+        const result = await evmTransactionService.getDonationHandlerLogs(
+          NetworkId.MAINNET,
+          100,
+          200,
+        );
+        expect(result.logs).to.have.length(1);
+        expect(result.logs[0].from).to.equal(RELAYER);
+      });
+
+      it('keeps tx.from and still returns when tracing fails, even transiently', async () => {
+        setProvider(NetworkId.MAINNET);
+        provider.send.rejects(
+          Object.assign(new Error('bad response'), {
+            code: 'SERVER_ERROR',
+            status: 503,
+          }),
+        );
+        const from = await scan({ native: true });
+        expect(provider.send.called).to.equal(true);
+        expect(from).to.equal(RELAYER);
+      });
+
+      it('keeps tx.from when the RPC does not support tracing', async () => {
+        setProvider(NetworkId.MAINNET);
+        provider.send.rejects(
+          Object.assign(new Error('method not found'), { code: -32601 }),
+        );
+        const from = await scan({ native: true });
+        expect(provider.send.called).to.equal(true);
+        expect(from).to.equal(RELAYER);
+      });
+
+      it('does not trace a native donation sent straight to the handler', async () => {
+        const from = await scan({
+          native: true,
+          txTo: getDonationHandlerAddresses(NetworkId.MAINNET)[0],
+        });
+        expect(provider.send.called).to.equal(false);
+        expect(from).to.equal(RELAYER);
+      });
     });
 
     it('clamps toBlock to the current head and reports it as latestBlock', async () => {
@@ -1246,7 +2148,7 @@ describe('EvmTransactionService', () => {
       );
 
       expect(provider.getBlock.callCount).to.equal(1);
-      expect(provider.getTransaction.callCount).to.equal(1);
+      expect(provider.getTransactionReceipt.callCount).to.equal(1);
     });
 
     it('scans every handler address of a multi-handler network and merges', async () => {
@@ -1332,7 +2234,7 @@ describe('EvmTransactionService', () => {
           transactionHash: '0xaa',
         }),
       ]);
-      provider.getTransaction.resolves(null);
+      provider.getTransactionReceipt.resolves(null);
 
       let error: unknown;
       try {
