@@ -148,6 +148,32 @@ describe('TransactionVerificationService', () => {
           1,
           '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
           '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+          undefined,
+        ),
+      ).to.be.true;
+    });
+
+    it('should pass an optional block number to the EVM service', async () => {
+      const checkOwnershipStub = sinon.stub(
+        evmTransactionServiceModule.evmTransactionService,
+        'checkErc721Ownership',
+      );
+      checkOwnershipStub.resolves(false);
+
+      const result = await service.checkErc721Ownership({
+        networkId: 1,
+        walletAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+        contractAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+        blockNumber: 19000000,
+      });
+
+      expect(result).to.equal(false);
+      expect(
+        checkOwnershipStub.calledOnceWithExactly(
+          1,
+          '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+          '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+          19000000,
         ),
       ).to.be.true;
     });

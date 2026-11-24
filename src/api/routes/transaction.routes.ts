@@ -4,6 +4,7 @@ import { transactionVerificationService } from '../../services/transactionVerifi
 import { priceService } from '../../services/priceService';
 import { validateRequest } from '../middleware/validation';
 import {
+  BlockByTimestampInput,
   Erc721OwnershipCheckInput,
   TransactionDetailInput,
   TransactionVerificationResult,
@@ -60,6 +61,14 @@ const erc721OwnershipSchema = Joi.object({
   contractAddress: Joi.string()
     .pattern(/^0x[a-fA-F0-9]{40}$/)
     .required(),
+  // Optional: read ownership as of this block instead of the latest one.
+  blockNumber: Joi.number().integer().min(0).optional(),
+});
+
+const blockByTimestampSchema = Joi.object({
+  networkId: Joi.number().integer().positive().required(),
+  // Unix time in seconds.
+  timestamp: Joi.number().integer().positive().required(),
 });
 
 // Max block span per DonationMade scan request. Kept below common free-tier RPC
@@ -251,7 +260,30 @@ router.post(
         success: true,
         data: {
           ownsNft,
+          // Echo the block the answer was read at (null = latest). A caller
+          // that asked for a historical block uses this to tell a pinned
+          // answer from one given by an older build that ignores the field.
+          blockNumber: input.blockNumber ?? null,
         },
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+router.post(
+  '/block/by-timestamp',
+  validateRequest(blockByTimestampSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const input: BlockByTimestampInput = req.body;
+      const result =
+        await transactionVerificationService.getBlockNumberAtTimestamp(input);
+
+      res.json({
+        success: true,
+        data: result,
       });
     } catch (error) {
       next(error);

@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import { logger } from '../../../utils/logger';
 import {
+  BlockByTimestampResult,
   BlockchainError,
   BlockchainErrorCode,
   NetworkTransactionInfo,
@@ -122,6 +123,9 @@ export interface DonationHandlerLogsResult {
 
 export class EvmTransactionService implements IChainHandler {
   private providers: Map<number, ethers.providers.JsonRpcProvider> = new Map();
+  // `${networkId}:${contract}:${block}` for contracts found to have no code at
+  // that block. A fact about finalized history, so it never needs invalidating.
+  private contractsWithoutCodeAtBlock: Set<string> = new Set();
 
   private formatAmountForTokenDecimals(
     amount: number,
@@ -228,6 +232,7 @@ export class EvmTransactionService implements IChainHandler {
     networkId: number,
     walletAddress: string,
     contractAddress: string,
+    blockNumber?: number,
   ): Promise<boolean> {
     if (!this.isSupported(networkId)) {
       throw new BlockchainError(
@@ -260,14 +265,54 @@ export class EvmTransactionService implements IChainHandler {
         ERC721_ABI,
         provider,
       );
-      const balance: ethers.BigNumber = await contract.balanceOf(walletAddress);
+      // No blockNumber = latest block, exactly as before.
+      if (blockNumber === undefined) {
+        const balance: ethers.BigNumber =
+          await contract.balanceOf(walletAddress);
+        return balance.gt(0);
+      }
 
-      return balance.gt(0);
+      // With one, the read is pinned to that block so the answer never changes
+      // on a retry.
+      const noCodeKey = `${networkId}:${contractAddress.toLowerCase()}:${blockNumber}`;
+      if (this.contractsWithoutCodeAtBlock.has(noCodeKey)) {
+        return false;
+      }
+
+      try {
+        const balance: ethers.BigNumber = await contract.balanceOf(
+          walletAddress,
+          { blockTag: blockNumber },
+        );
+        return balance.gt(0);
+      } catch (callError) {
+        // A historical read can fail for two very different reasons, and only
+        // one of them is a failure. If the contract had not been deployed yet
+        // at that block, the call returns no data and ethers throws; but the
+        // answer is known and final: nobody held a token of a contract that
+        // did not exist. Ask the chain directly rather than infer it from the
+        // error's shape. Anything else (RPC down, state pruned, bad address)
+        // stays an error, so the caller reports "unknown" and can retry.
+        const code = await provider.getCode(contractAddress, blockNumber);
+        if (code === '0x') {
+          // Immutable for a given (network, contract, block): remember it so
+          // the rest of a round's wallets cost no RPC calls at all.
+          this.contractsWithoutCodeAtBlock.add(noCodeKey);
+          logger.info('ERC-721 contract has no code at the requested block', {
+            networkId,
+            contractAddress,
+            blockNumber,
+          });
+          return false;
+        }
+        throw callError;
+      }
     } catch (error) {
       logger.error('Failed to check ERC-721 ownership', {
         networkId,
         walletAddress,
         contractAddress,
+        blockNumber,
         error: error instanceof Error ? error.message : 'Unknown error',
       });
 
@@ -278,6 +323,97 @@ export class EvmTransactionService implements IChainHandler {
           networkId,
           walletAddress,
           contractAddress,
+          blockNumber,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        },
+      );
+    }
+  }
+
+  /**
+   * Resolve the last block mined at or before `timestamp` (unix seconds) by
+   * binary search over block timestamps. Costs about log2(chain height) RPC
+   * calls, so callers should store the result rather than ask again.
+   *
+   * Throws when the timestamp is ahead of the chain head (the block does not
+   * exist yet) or before the first block.
+   */
+  async getBlockNumberAtTimestamp(
+    networkId: number,
+    timestamp: number,
+  ): Promise<BlockByTimestampResult> {
+    if (!this.isSupported(networkId)) {
+      throw new BlockchainError(
+        BlockchainErrorCode.UNSUPPORTED_CHAIN,
+        `Block lookup by timestamp is only supported on EVM networks (received ${networkId})`,
+        { networkId },
+      );
+    }
+
+    try {
+      const provider = this.getProvider(networkId);
+      const latest = await provider.getBlock('latest');
+      if (!latest || timestamp > latest.timestamp) {
+        throw new BlockchainError(
+          BlockchainErrorCode.PROVIDER_ERROR,
+          'Timestamp is ahead of the latest block',
+          { networkId, timestamp, latestTimestamp: latest?.timestamp },
+        );
+      }
+
+      const first = await provider.getBlock(0);
+      if (!first || first.timestamp > timestamp) {
+        throw new BlockchainError(
+          BlockchainErrorCode.PROVIDER_ERROR,
+          'Timestamp is before the first block',
+          { networkId, timestamp },
+        );
+      }
+
+      // Invariant: block `low` is at or before the timestamp, and every block
+      // above `high` is after it.
+      let low = 0;
+      let lowTimestamp = first.timestamp;
+      let high = latest.number;
+
+      while (low < high) {
+        // Upper mid, so the loop still makes progress when high = low + 1.
+        const mid = low + Math.ceil((high - low) / 2);
+        const block = await provider.getBlock(mid);
+        if (!block) {
+          throw new BlockchainError(
+            BlockchainErrorCode.PROVIDER_ERROR,
+            `Block ${mid} not returned by the RPC`,
+            { networkId, blockNumber: mid },
+          );
+        }
+
+        if (block.timestamp <= timestamp) {
+          low = mid;
+          lowTimestamp = block.timestamp;
+        } else {
+          high = mid - 1;
+        }
+      }
+
+      return { blockNumber: low, blockTimestamp: lowTimestamp };
+    } catch (error) {
+      if (error instanceof BlockchainError) {
+        throw error;
+      }
+
+      logger.error('Failed to resolve block by timestamp', {
+        networkId,
+        timestamp,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+
+      throw new BlockchainError(
+        BlockchainErrorCode.NETWORK_ERROR,
+        'Failed to resolve block by timestamp',
+        {
+          networkId,
+          timestamp,
           error: error instanceof Error ? error.message : 'Unknown error',
         },
       );

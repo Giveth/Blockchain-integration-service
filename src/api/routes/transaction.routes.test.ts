@@ -13,6 +13,7 @@ describe('Transaction Routes', () => {
   let getTransactionTimestampStub: sinon.SinonStub;
   let getTokenPriceStub: sinon.SinonStub;
   let checkErc721OwnershipStub: sinon.SinonStub;
+  let getBlockNumberAtTimestampStub: sinon.SinonStub;
 
   beforeEach(() => {
     // Mock transaction verification service
@@ -31,6 +32,10 @@ describe('Transaction Routes', () => {
     checkErc721OwnershipStub = sinon.stub(
       transactionVerificationServiceModule.transactionVerificationService,
       'checkErc721Ownership',
+    );
+    getBlockNumberAtTimestampStub = sinon.stub(
+      transactionVerificationServiceModule.transactionVerificationService,
+      'getBlockNumberAtTimestamp',
     );
 
     // Mock price service
@@ -562,6 +567,48 @@ describe('Transaction Routes', () => {
       });
       expect(response.body.success).to.be.true;
       expect(response.body.data.ownsNft).to.equal(true);
+      // No block requested: answered at the latest block, echoed as null.
+      expect(response.body.data.blockNumber).to.equal(null);
+    });
+
+    it('should pass an optional blockNumber through and echo it back', async () => {
+      checkErc721OwnershipStub.resolves(false);
+
+      const response = await request(app)
+        .post('/api/nft/erc721/ownership')
+        .send({
+          networkId: 1,
+          walletAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+          contractAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+          blockNumber: 19000000,
+        })
+        .expect(200);
+
+      expect(checkErc721OwnershipStub.firstCall.args[0]).to.deep.equal({
+        networkId: 1,
+        walletAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+        contractAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+        blockNumber: 19000000,
+      });
+      expect(response.body.data).to.deep.equal({
+        ownsNft: false,
+        blockNumber: 19000000,
+      });
+    });
+
+    it('should reject a non-integer blockNumber', async () => {
+      const response = await request(app)
+        .post('/api/nft/erc721/ownership')
+        .send({
+          networkId: 1,
+          walletAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+          contractAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+          blockNumber: -5,
+        })
+        .expect(400);
+
+      expect(response.body.success).to.be.false;
+      expect(checkErc721OwnershipStub.called).to.be.false;
     });
 
     it('should reject invalid wallet addresses', async () => {
@@ -590,6 +637,50 @@ describe('Transaction Routes', () => {
           walletAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
           contractAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
         });
+
+      expect(response.status).to.be.oneOf([400, 500]);
+      expect(response.body.success).to.be.false;
+    });
+  });
+
+  describe('POST /api/block/by-timestamp', () => {
+    it('should return 400 for missing required fields', async () => {
+      const response = await request(app)
+        .post('/api/block/by-timestamp')
+        .send({ networkId: 1 })
+        .expect(400);
+
+      expect(response.body.success).to.be.false;
+      expect(getBlockNumberAtTimestampStub.called).to.be.false;
+    });
+
+    it('should return the resolved block', async () => {
+      getBlockNumberAtTimestampStub.resolves({
+        blockNumber: 19000000,
+        blockTimestamp: 1705000000,
+      });
+
+      const response = await request(app)
+        .post('/api/block/by-timestamp')
+        .send({ networkId: 1, timestamp: 1705000005 })
+        .expect(200);
+
+      expect(getBlockNumberAtTimestampStub.firstCall.args[0]).to.deep.equal({
+        networkId: 1,
+        timestamp: 1705000005,
+      });
+      expect(response.body).to.deep.equal({
+        success: true,
+        data: { blockNumber: 19000000, blockTimestamp: 1705000000 },
+      });
+    });
+
+    it('should surface service errors as a failed response', async () => {
+      getBlockNumberAtTimestampStub.rejects(new Error('rpc down'));
+
+      const response = await request(app)
+        .post('/api/block/by-timestamp')
+        .send({ networkId: 1, timestamp: 1705000005 });
 
       expect(response.status).to.be.oneOf([400, 500]);
       expect(response.body.success).to.be.false;
