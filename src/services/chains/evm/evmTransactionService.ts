@@ -2204,58 +2204,6 @@ export class EvmTransactionService implements IChainHandler {
     return transactionInfo;
   }
 
-  async isSwapTransactionToAddress(
-    networkId: number,
-    txHash: string,
-    toAddress: string,
-  ): Promise<boolean> {
-    try {
-      const provider = this.getProvider(networkId);
-      const receipt = await provider.getTransactionReceipt(txHash);
-
-      if (!receipt || !receipt.logs) {
-        logger.debug(
-          'No transaction receipt or logs found for swap validation',
-          {
-            txHash,
-            networkId,
-          },
-        );
-        return false;
-      }
-
-      const transfers = this.parseTransferEvents(receipt.logs);
-      const hasTransferToAddress = transfers.some(
-        (t) => t.to.toLowerCase() === toAddress.toLowerCase(),
-      );
-
-      if (hasTransferToAddress) {
-        logger.debug('Found transfer to target address in swap transaction', {
-          txHash,
-          toAddress,
-        });
-      } else {
-        logger.debug(
-          'No transfer to target address found in swap transaction',
-          {
-            txHash,
-            toAddress,
-          },
-        );
-      }
-
-      return hasTransferToAddress;
-    } catch (error) {
-      logger.error('Error validating swap transaction', {
-        error: error instanceof Error ? error.message : 'Unknown error',
-        txHash,
-        networkId,
-        toAddress,
-      });
-      return false;
-    }
-  }
-
   async getTransactionInfo(
     input: TransactionDetailInput,
   ): Promise<NetworkTransactionInfo> {
