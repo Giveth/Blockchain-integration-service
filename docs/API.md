@@ -165,6 +165,9 @@ Verify a single transaction against expected parameters.
 }
 ```
 
+`isSwap` must be `false` or omitted: swap transactions are not supported and
+`isSwap: true` is rejected with `SWAP_VALIDATION_FAILED`.
+
 **Response (Success):**
 ```json
 {
@@ -371,7 +374,7 @@ interface TransactionDetailInput {
   safeTxHash?: string;              // Safe transaction hash (optional)
   nonce?: number;                   // Transaction nonce (optional)
   chainType?: ChainType;            // Chain type override (optional)
-  isSwap?: boolean;                 // Is swap transaction (optional)
+  isSwap?: boolean;                 // Not supported: true is rejected with SWAP_VALIDATION_FAILED
   importedFromDraftOrBackupService?: boolean; // Skip timestamp validation
 }
 ```
@@ -517,10 +520,6 @@ Fetches transaction details from an EVM chain.
 ##### `getTransactionTimestamp(txHash: string, networkId: number): Promise<number>`
 
 Gets transaction timestamp from block.
-
-##### `isSwapTransactionToAddress(networkId: number, txHash: string, toAddress: string): Promise<boolean>`
-
-Validates that a swap transaction transfers tokens to the target address.
 
 **Example:**
 ```typescript
