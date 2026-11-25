@@ -35,30 +35,6 @@ export class TransactionVerificationService {
       expectedAmount: input.amount,
     });
 
-    // For swap transactions, use special validation
-    if (input.isSwap) {
-      const isValidSwap =
-        await evmTransactionService.isSwapTransactionToAddress(
-          input.networkId,
-          transaction.hash,
-          input.toAddress,
-        );
-
-      if (!isValidSwap) {
-        throw new BlockchainError(
-          BlockchainErrorCode.SWAP_VALIDATION_FAILED,
-          'Swap transaction does not transfer to the expected address',
-          {
-            txHash: transaction.hash,
-            expectedTo: input.toAddress,
-          },
-        );
-      }
-
-      logger.debug('Swap transaction validated successfully');
-      return;
-    }
-
     if (
       normalizeAddress(transaction.to) !== normalizeAddress(input.toAddress)
     ) {
@@ -138,6 +114,17 @@ export class TransactionVerificationService {
     });
 
     try {
+      // Swap verification only proved that some Transfer reached the
+      // recipient, without checking amount, token or sender, so swaps are
+      // never verified (GSEC-2026-028).
+      if (input.isSwap) {
+        throw new BlockchainError(
+          BlockchainErrorCode.SWAP_VALIDATION_FAILED,
+          'Swap transactions are not supported',
+          { txHash: input.txHash, networkId: input.networkId },
+        );
+      }
+
       if (input.safeTxHash && !input.txHash) {
         logger.debug('Fetching Safe transaction hash', {
           safeTxHash: input.safeTxHash,
