@@ -53,6 +53,33 @@ describe('TransactionVerificationService', () => {
     });
   });
 
+  describe('swap transactions (GSEC-2026-028)', () => {
+    afterEach(() => sinon.restore());
+
+    it('should reject isSwap without querying the network', async () => {
+      const receiptStub = sinon.stub(
+        evmTransactionServiceModule.evmTransactionService,
+        'getTransactionInfo',
+      );
+
+      const result = await service.verifyTransaction({
+        txHash:
+          '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+        networkId: 1,
+        symbol: 'ETH',
+        fromAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0',
+        toAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+        amount: 100000,
+        timestamp: Math.floor(Date.now() / 1000),
+        isSwap: true,
+      });
+
+      expect(result.isValid).to.equal(false);
+      expect(result.errorCode).to.equal('SWAP_VALIDATION_FAILED');
+      expect(receiptStub.called).to.equal(false);
+    });
+  });
+
   describe('verifyTransactions', () => {
     it('should handle batch verification', async () => {
       const inputs: TransactionDetailInput[] = [
