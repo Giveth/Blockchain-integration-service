@@ -191,7 +191,6 @@ describe('Transaction Routes', () => {
           toAddress: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
           amount: 1.5,
           timestamp: Math.floor(Date.now() / 1000),
-          isSwap: true,
           nonce: 42,
           safeTxHash: '0xsafe123',
         })
@@ -199,7 +198,6 @@ describe('Transaction Routes', () => {
 
       // Verify optional fields were passed to service
       const serviceInput = verifyTransactionStub.firstCall.args[0];
-      expect(serviceInput.isSwap).to.equal(true);
       expect(serviceInput.nonce).to.equal(42);
       expect(serviceInput.safeTxHash).to.equal('0xsafe123');
     });
