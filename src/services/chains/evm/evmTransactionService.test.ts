@@ -2282,4 +2282,303 @@ describe('EvmTransactionService', () => {
       expect(provider.getLogs.called).to.be.false;
     });
   });
+
+  describe('checkErc721Ownership (optional historical block)', () => {
+    // Lowercase on purpose: ethers rejects a mixed-case address whose checksum
+    // is wrong, and callers send lowercased addresses.
+    const WALLET = '0x742d35cc6634c0532925a3b844bc9e7595f0beb0';
+    const CONTRACT = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
+    const encodeBalance = (n: number) =>
+      ethers.utils.defaultAbiCoder.encode(['uint256'], [n]);
+
+    let call: sinon.SinonStub;
+    let getCode: sinon.SinonStub;
+
+    beforeEach(() => {
+      // A real provider object (ethers.Contract insists on one) whose only
+      // network-touching methods, `call` and `getCode`, are stubbed.
+      const provider = new ethers.providers.JsonRpcProvider(
+        'http://127.0.0.1:1',
+        1,
+      );
+      call = sinon.stub(provider, 'call').resolves(encodeBalance(1));
+      getCode = sinon.stub(provider, 'getCode').resolves('0x6080604052');
+      providers.set(NetworkId.MAINNET, provider);
+    });
+
+    afterEach(() => {
+      providers.delete(NetworkId.MAINNET);
+      sinon.restore();
+    });
+
+    it('reads at the latest block when no block is given', async () => {
+      const owns = await evmTransactionService.checkErc721Ownership(
+        NetworkId.MAINNET,
+        WALLET,
+        CONTRACT,
+      );
+
+      expect(owns).to.be.true;
+      expect(call.calledOnce).to.be.true;
+      expect(call.firstCall.args[1]).to.equal(undefined);
+    });
+
+    it('pins the read to the requested block', async () => {
+      call.resolves(encodeBalance(0));
+
+      const owns = await evmTransactionService.checkErc721Ownership(
+        NetworkId.MAINNET,
+        WALLET,
+        CONTRACT,
+        19_000_000,
+      );
+
+      expect(owns).to.be.false;
+      expect(call.firstCall.args[1]).to.equal(19_000_000);
+    });
+
+    describe('the four historical outcomes', () => {
+      it('contract exists and the wallet owns a token -> true', async () => {
+        call.resolves(encodeBalance(2));
+
+        const owns = await evmTransactionService.checkErc721Ownership(
+          NetworkId.MAINNET,
+          WALLET,
+          CONTRACT,
+          20_000_001,
+        );
+
+        expect(owns).to.be.true;
+        // The happy path costs one RPC call; contract existence is only
+        // checked when the read fails.
+        expect(getCode.called).to.be.false;
+      });
+
+      it('contract exists and the wallet owns nothing -> false', async () => {
+        call.resolves(encodeBalance(0));
+
+        const owns = await evmTransactionService.checkErc721Ownership(
+          NetworkId.MAINNET,
+          WALLET,
+          CONTRACT,
+          20_000_002,
+        );
+
+        expect(owns).to.be.false;
+        expect(getCode.called).to.be.false;
+      });
+
+      it('contract did not exist at that block -> false, not an error', async () => {
+        // eth_call against an address with no code returns empty data, which
+        // ethers turns into a CALL_EXCEPTION.
+        call.resolves('0x');
+        getCode.resolves('0x');
+
+        const owns = await evmTransactionService.checkErc721Ownership(
+          NetworkId.MAINNET,
+          WALLET,
+          CONTRACT,
+          20_000_003,
+        );
+
+        expect(owns).to.be.false;
+        expect(getCode.calledOnceWithExactly(CONTRACT, 20_000_003)).to.be.true;
+      });
+
+      it('RPC failure with the contract deployed -> raises (unknown)', async () => {
+        call.rejects(new Error('missing trie node'));
+        getCode.resolves('0x6080604052');
+
+        try {
+          await evmTransactionService.checkErc721Ownership(
+            NetworkId.MAINNET,
+            WALLET,
+            CONTRACT,
+            20_000_004,
+          );
+          expect.fail('expected the ownership check to throw');
+        } catch (error) {
+          expect(error).to.be.instanceOf(BlockchainError);
+          expect((error as BlockchainError).code).to.equal(
+            BlockchainErrorCode.NETWORK_ERROR,
+          );
+        }
+      });
+
+      it('RPC failure on the existence check too -> raises (unknown), never false', async () => {
+        call.rejects(new Error('timeout'));
+        getCode.rejects(new Error('timeout'));
+
+        try {
+          await evmTransactionService.checkErc721Ownership(
+            NetworkId.MAINNET,
+            WALLET,
+            CONTRACT,
+            20_000_005,
+          );
+          expect.fail('expected the ownership check to throw');
+        } catch (error) {
+          expect(error).to.be.instanceOf(BlockchainError);
+        }
+      });
+
+      it('remembers a contract with no code at a block and stops calling the RPC', async () => {
+        call.resolves('0x');
+        getCode.resolves('0x');
+        const OTHER_WALLET = '0x00000000000000000000000000000000000000aa';
+
+        await evmTransactionService.checkErc721Ownership(
+          NetworkId.MAINNET,
+          WALLET,
+          CONTRACT,
+          20_000_006,
+        );
+        call.resetHistory();
+        getCode.resetHistory();
+
+        const owns = await evmTransactionService.checkErc721Ownership(
+          NetworkId.MAINNET,
+          OTHER_WALLET,
+          CONTRACT,
+          20_000_006,
+        );
+
+        expect(owns).to.be.false;
+        expect(call.called).to.be.false;
+        expect(getCode.called).to.be.false;
+
+        // A different block is a different question.
+        call.resolves(encodeBalance(1));
+        expect(
+          await evmTransactionService.checkErc721Ownership(
+            NetworkId.MAINNET,
+            OTHER_WALLET,
+            CONTRACT,
+            20_000_007,
+          ),
+        ).to.be.true;
+      });
+
+      it('a latest-block read keeps its old behaviour: a failed call raises', async () => {
+        call.resolves('0x');
+        getCode.resolves('0x');
+
+        try {
+          await evmTransactionService.checkErc721Ownership(
+            NetworkId.MAINNET,
+            WALLET,
+            CONTRACT,
+          );
+          expect.fail('expected the ownership check to throw');
+        } catch (error) {
+          expect(error).to.be.instanceOf(BlockchainError);
+        }
+        expect(getCode.called).to.be.false;
+      });
+    });
+
+    it('raises instead of answering when the historical read fails', async () => {
+      call.rejects(new Error('missing trie node'));
+
+      try {
+        await evmTransactionService.checkErc721Ownership(
+          NetworkId.MAINNET,
+          WALLET,
+          CONTRACT,
+          19_000_000,
+        );
+        expect.fail('expected the ownership check to throw');
+      } catch (error) {
+        expect(error).to.be.instanceOf(BlockchainError);
+        expect((error as BlockchainError).code).to.equal(
+          BlockchainErrorCode.NETWORK_ERROR,
+        );
+      }
+    });
+  });
+
+  describe('getBlockNumberAtTimestamp', () => {
+    // Block n is mined at 1000 + 12n, so timestamps map back unambiguously.
+    const timestampOf = (n: number) => 1000 + 12 * n;
+    let getBlock: sinon.SinonStub;
+
+    const setChain = (height: number) => {
+      getBlock = sinon.stub().callsFake(async (tag: number | string) => {
+        const number = tag === 'latest' ? height : (tag as number);
+        return { number, timestamp: timestampOf(number) };
+      });
+      providers.set(NetworkId.MAINNET, { getBlock });
+    };
+
+    afterEach(() => {
+      providers.delete(NetworkId.MAINNET);
+      sinon.restore();
+    });
+
+    it('returns the block mined exactly at the timestamp', async () => {
+      setChain(1000);
+
+      const result = await evmTransactionService.getBlockNumberAtTimestamp(
+        NetworkId.MAINNET,
+        timestampOf(337),
+      );
+
+      expect(result).to.deep.equal({
+        blockNumber: 337,
+        blockTimestamp: timestampOf(337),
+      });
+    });
+
+    it('returns the last block before a timestamp that falls between blocks', async () => {
+      setChain(1000);
+
+      const result = await evmTransactionService.getBlockNumberAtTimestamp(
+        NetworkId.MAINNET,
+        timestampOf(338) - 1,
+      );
+
+      expect(result.blockNumber).to.equal(337);
+      // Binary search, not a scan.
+      expect(getBlock.callCount).to.be.lessThan(20);
+    });
+
+    it('returns the head when the timestamp equals the latest block', async () => {
+      setChain(1000);
+
+      const result = await evmTransactionService.getBlockNumberAtTimestamp(
+        NetworkId.MAINNET,
+        timestampOf(1000),
+      );
+
+      expect(result.blockNumber).to.equal(1000);
+    });
+
+    it('refuses a timestamp ahead of the chain head', async () => {
+      setChain(1000);
+
+      try {
+        await evmTransactionService.getBlockNumberAtTimestamp(
+          NetworkId.MAINNET,
+          timestampOf(1000) + 1,
+        );
+        expect.fail('expected the lookup to throw');
+      } catch (error) {
+        expect(error).to.be.instanceOf(BlockchainError);
+      }
+    });
+
+    it('refuses a timestamp before the first block', async () => {
+      setChain(1000);
+
+      try {
+        await evmTransactionService.getBlockNumberAtTimestamp(
+          NetworkId.MAINNET,
+          timestampOf(0) - 1,
+        );
+        expect.fail('expected the lookup to throw');
+      } catch (error) {
+        expect(error).to.be.instanceOf(BlockchainError);
+      }
+    });
+  });
 });

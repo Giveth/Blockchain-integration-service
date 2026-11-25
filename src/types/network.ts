@@ -146,4 +146,25 @@ export interface Erc721OwnershipCheckInput {
   networkId: number;
   walletAddress: string;
   contractAddress: string;
+  /**
+   * Optional block to read ownership at. Omitted = latest block (the original
+   * behaviour). When set, the call is pinned with `blockTag`, so the RPC for
+   * that network must serve historical state for that block.
+   */
+  blockNumber?: number;
+}
+
+/**
+ * Request to resolve the last block mined at or before a point in time.
+ */
+export interface BlockByTimestampInput {
+  networkId: number;
+  /** Unix time in seconds. */
+  timestamp: number;
+}
+
+export interface BlockByTimestampResult {
+  blockNumber: number;
+  /** Unix time in seconds of that block (always <= the requested timestamp). */
+  blockTimestamp: number;
 }

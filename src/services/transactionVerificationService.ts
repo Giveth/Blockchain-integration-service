@@ -1,4 +1,6 @@
 import {
+  BlockByTimestampInput,
+  BlockByTimestampResult,
   Erc721OwnershipCheckInput,
   TransactionDetailInput,
   NetworkTransactionInfo,
@@ -293,6 +295,7 @@ export class TransactionVerificationService {
       networkId: input.networkId,
       walletAddress: input.walletAddress,
       contractAddress: input.contractAddress,
+      blockNumber: input.blockNumber,
     });
 
     try {
@@ -300,6 +303,7 @@ export class TransactionVerificationService {
         input.networkId,
         input.walletAddress,
         input.contractAddress,
+        input.blockNumber,
       );
     } catch (error) {
       logger.error('Error checking ERC-721 ownership', {
@@ -307,9 +311,22 @@ export class TransactionVerificationService {
         networkId: input.networkId,
         walletAddress: input.walletAddress,
         contractAddress: input.contractAddress,
+        blockNumber: input.blockNumber,
       });
       throw error;
     }
+  }
+
+  /**
+   * Last block mined at or before a unix timestamp (seconds) on an EVM network.
+   */
+  async getBlockNumberAtTimestamp(
+    input: BlockByTimestampInput,
+  ): Promise<BlockByTimestampResult> {
+    return evmTransactionService.getBlockNumberAtTimestamp(
+      input.networkId,
+      input.timestamp,
+    );
   }
 }
 
