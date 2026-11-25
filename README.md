@@ -7,7 +7,6 @@ A comprehensive REST API service for blockchain transaction verification and mul
 - 🔗 **Multi-Chain Support**: EVM (Ethereum, Polygon, Optimism, Arbitrum, etc.) and Solana
 - ✅ **Transaction Verification**: Comprehensive validation of on-chain transactions
 - 🔒 **Safe/Gnosis Safe Support**: Handle multisig transactions
-- 🔄 **Swap Transaction Support**: Validate DEX swap transactions
 - 🌐 **REST API**: Easy-to-use HTTP endpoints
 - 🐳 **Docker Ready**: Containerized deployment with Docker Compose
 - 📊 **Type-Safe**: Full TypeScript support with detailed type definitions
@@ -170,7 +169,7 @@ Verify a single transaction against expected parameters.
 - `amount`: Expected amount
 - `timestamp`: Transaction timestamp
 - `chainType` (optional): Chain type override
-- `isSwap` (optional): Whether this is a swap transaction
+- `isSwap` (optional): Swap transactions are not supported; `true` is always rejected with `SWAP_VALIDATION_FAILED`
 - `safeTxHash` (optional): Safe transaction hash for multisig
 - `importedFromDraftOrBackupService` (optional): Skip timestamp validation
 
@@ -218,9 +217,6 @@ const txInfo = await evmTransactionService.getTransactionInfo(input);
 
 // Get transaction timestamp
 const timestamp = await evmTransactionService.getTransactionTimestamp(txHash, networkId);
-
-// Validate swap transaction
-const isValid = await evmTransactionService.isSwapTransactionToAddress(networkId, txHash, toAddress);
 ```
 
 #### Solana Transaction Service
@@ -264,7 +260,7 @@ try {
 - `TO_ADDRESS_MISMATCH`: Recipient address doesn't match
 - `AMOUNT_MISMATCH`: Amount doesn't match expected value
 - `TIMESTAMP_TOO_OLD`: Transaction timestamp is too old
-- `SWAP_VALIDATION_FAILED`: Swap transaction validation failed
+- `SWAP_VALIDATION_FAILED`: Swap transactions are not supported (`isSwap: true` is always rejected)
 - `SAFE_TRANSACTION_NOT_FOUND`: Safe transaction not executed yet
 - `NETWORK_ERROR`: Network or RPC error
 - `PROVIDER_ERROR`: Provider configuration error
@@ -287,20 +283,11 @@ const result = await transactionVerificationService.verifyTransaction({
 });
 ```
 
-### Verify a Swap Transaction
+### Swap Transactions
 
-```typescript
-const result = await transactionVerificationService.verifyTransaction({
-  txHash: '0xabc123...',
-  networkId: 1,
-  symbol: 'USDC',
-  fromAddress: '0x1234...',
-  toAddress: '0x5678...',
-  amount: 100,
-  timestamp: Math.floor(Date.now() / 1000),
-  isSwap: true, // Enable swap validation
-});
-```
+Swap verification is not supported. A request with `isSwap: true` is rejected
+before any network call with `isValid: false` and error code
+`SWAP_VALIDATION_FAILED`.
 
 ### Verify a Safe Transaction
 
